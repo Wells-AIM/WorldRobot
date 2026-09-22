@@ -167,13 +167,66 @@ def test_horizon_mapping():
 
 def test_modes_include_the_original_variants_and_four_controlled_arms():
     assert MODES == (*ORIGINAL_MODES, *CONTROLLED_MODES)
-    assert ORIGINAL_MODES == ("original", "original_no_oracle", "original_deep")
+    assert ORIGINAL_MODES == (
+        "original",
+        "original_no_oracle",
+        "original_deep",
+        "original_trajectory",
+    )
     assert CONTROLLED_MODES == (
         "reactive",
         "short_preview",
         "counterfactual_future",
         "shuffle_future",
     )
+
+
+def test_trajectory_option_keeps_the_executable_step_visible(recorded):
+    """original_trajectory adds the path without replacing the executed step.
+
+    This is the distinction original_deep got wrong: it swapped the one-primitive
+    derived fields for a chunk endpoint, so the critic optimised a chunk that the
+    receding horizon never finishes.
+    """
+    from jev_libero.policy import ValidatedPolicy
+
+    cfg, rows = recorded
+    row = rows[0]
+    predictions = {
+        name: {
+            **p,
+            "trajectory": {
+                "horizon_s": 1.2,
+                "checkpoints": [
+                    {"t_s": 0.4, "eef_mm": [0, 0, 0]},
+                    {"t_s": 0.8, "eef_mm": [0, 0, 0]},
+                    {"t_s": 1.2, "eef_mm": [0, 0, 0]},
+                ],
+                "events": [],
+            },
+        }
+        for name, p in row["predictions"].items()
+    }
+    api = MockJev()
+    ValidatedPolicy(True, cfg).choose(api, 0, row["before"], predictions)
+    motor = next(r for r in api.requests if r["layer"] == "motor")
+    name, option = next(iter(motor["criteria"].items()))
+    assert "future_trajectory" in option
+    assert [c["t_s"] for c in option["future_trajectory"]["checkpoints"]] == [0.4, 0.8, 1.2]
+    # The one-primitive fields the published pipeline relies on are still there.
+    assert option["predicted_closing_mm"] == round(row["predictions"][name]["closing_mm"], 3)
+    assert "predicted_surface_gap_reduction_mm" in option
+
+
+def test_original_prompt_has_no_trajectory_field(recorded):
+    """Without the field, the published pipeline's prompt is untouched."""
+    from jev_libero.policy import ValidatedPolicy
+
+    cfg, rows = recorded
+    api = MockJev()
+    ValidatedPolicy(True, cfg).choose(api, 0, rows[0]["before"], rows[0]["predictions"])
+    motor = next(r for r in api.requests if r["layer"] == "motor")
+    assert all("future_trajectory" not in o for o in motor["criteria"].values())
 
 
 def test_prune_oracle_keeps_the_task_aligned_fields(recorded):

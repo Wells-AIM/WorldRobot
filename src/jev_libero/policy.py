@@ -171,6 +171,11 @@ class ValidatedPolicy:
             }
             if p.get("reposition_witness"):
                 options[name]["verified_two_step_witness"] = p["reposition_witness"]
+            # Present only under original_trajectory; the fields above still
+            # describe the one primitive that executes, so this adds the path
+            # without hiding the step.
+            if p.get("trajectory"):
+                options[name]["future_trajectory"] = p["trajectory"]
         choice = api.choose(
             step,
             "motor",

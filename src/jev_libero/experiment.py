@@ -30,7 +30,12 @@ CONTROLLED_MODES = ("reactive", "short_preview", "counterfactual_future", "shuff
 # Variants of the published pipeline, used to test it against itself rather than
 # against a stripped-down baseline. Both keep its three layers, its effect
 # contracts and its task-aligned derived fields.
-ORIGINAL_MODES = ("original", "original_no_oracle", "original_deep")
+ORIGINAL_MODES = (
+    "original",
+    "original_no_oracle",
+    "original_deep",
+    "original_trajectory",
+)
 MODES = ORIGINAL_MODES + CONTROLLED_MODES
 
 # One primitive of the original engine: 8 environment steps at 20 Hz control.
@@ -104,6 +109,38 @@ class OracleFilteringAPI:
 
     def close(self):
         self.inner.close()
+
+
+def attach_trajectories(world, predictions, grip, depth, task_config, horizon=None):
+    """Add a `trajectory` field to each prediction, in place.
+
+    The published pipeline's derived fields keep describing the single primitive
+    that actually executes; this only adds the path that follows it. That is the
+    difference `original_deep` got wrong — it replaced the executable step with
+    a chunk endpoint, and lost every intermediate state.
+
+    Returns (simulated_steps, latency_ms) for the decision record.
+    """
+    from .futures import CandidateSequence, rollout_all
+
+    candidates = [
+        CandidateSequence(
+            candidate_id=name, actions=[name] * depth, family="", first_input=name
+        )
+        for name in predictions
+    ]
+    rollouts = rollout_all(world, candidates, grip, horizon, task_config)
+    for name, result in rollouts.items():
+        # Checkpoint 0 is the current state, already in the prompt's `before`.
+        predictions[name]["trajectory"] = {
+            "horizon_s": round(result.horizon_seconds, 3),
+            "checkpoints": result.checkpoints[1:],
+            "events": result.events,
+        }
+    return (
+        sum(r.horizon_steps for r in rollouts.values()),
+        round(sum(r.rollout_latency_ms for r in rollouts.values()), 3),
+    )
 
 
 def horizon_for(mode, requested):

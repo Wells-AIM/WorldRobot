@@ -66,7 +66,14 @@ def run(
     future_horizon_s=1.2,
     shuffle_seed=0,
 ):
-    from .experiment import MODES, ORIGINAL_MODES, OracleFilteringAPI, decide, horizon_for
+    from .experiment import (
+        MODES,
+        ORIGINAL_MODES,
+        OracleFilteringAPI,
+        attach_trajectories,
+        decide,
+        horizon_for,
+    )
     from .world import World
 
     cfg = load_task(task)
@@ -90,8 +97,12 @@ def run(
             "cost_basis": COST_BASIS.get(provider, "reported API cost"),
             "experiment_mode": mode,
             "candidate_count": candidate_count if mode not in ORIGINAL_MODES else None,
-            "candidate_depth": candidate_depth if mode not in ORIGINAL_MODES else None,
-            "future_horizon_requested_s": None
+            "candidate_depth": None
+            if mode in ("original", "original_no_oracle")
+            else candidate_depth,
+            "future_horizon_requested_s": future_horizon_s
+            if mode == "original_trajectory"
+            else None
             if mode in ORIGINAL_MODES
             else horizon_for(mode, future_horizon_s),
             "shuffle_seed": shuffle_seed if mode == "shuffle_future" else None,
@@ -157,8 +168,13 @@ def run(
             # The deep variant reasons over a chunk but still executes one
             # primitive, so the shallow predictions stay for the execution check.
             deep = None
+            rollout_steps = rollout_ms = 0
             if mode == "original_deep":
                 _, deep = world.predict_all_deep(grip, candidate_depth)
+            elif mode == "original_trajectory":
+                rollout_steps, rollout_ms = attach_trajectories(
+                    world, predictions, grip, candidate_depth, cfg, future_horizon_s
+                )
             # Witnesses are the pipeline's escape hatch when no contract passes.
             # Every original-family variant gets them on the same terms, so the
             # variants differ only in the one thing each is meant to change.
@@ -259,6 +275,16 @@ def run(
                 "decision_seconds": decision_time,
                 "two_step_evaluations": second_branches,
             }
+            if mode == "original_trajectory":
+                record.update(
+                    {
+                        "experiment_mode": mode,
+                        "candidate_depth": candidate_depth,
+                        "future_horizon_requested_s": future_horizon_s,
+                        "rollout_latency_ms": rollout_ms,
+                        "rollout_steps_total": rollout_steps,
+                    }
+                )
             if experiment_record is not None:
                 record.update(
                     {
@@ -351,8 +377,12 @@ def run(
             "seed": seed,
             "experiment_mode": mode,
             "candidate_count": candidate_count if mode not in ORIGINAL_MODES else None,
-            "candidate_depth": candidate_depth if mode not in ORIGINAL_MODES else None,
-            "future_horizon_requested_s": None
+            "candidate_depth": None
+            if mode in ("original", "original_no_oracle")
+            else candidate_depth,
+            "future_horizon_requested_s": future_horizon_s
+            if mode == "original_trajectory"
+            else None
             if mode in ORIGINAL_MODES
             else horizon_for(mode, future_horizon_s),
             "rollout_steps_total": sum(r.get("rollout_steps_total", 0) for r in records),

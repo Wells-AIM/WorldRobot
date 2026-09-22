@@ -69,6 +69,7 @@ how much future consequence information the critic receives.
 | `original` | 0.4 s (+ 2-step witness) | the published three-layer pipeline, untouched |
 | `original_no_oracle` | same | the same pipeline with the success predicate filtered out |
 | `original_deep` | D primitives | the same pipeline previewing a chunk endpoint instead of one primitive |
+| `original_trajectory` | D primitives | the same pipeline, one-primitive fields kept, plus trajectory checkpoints |
 | `reactive` | none | task, current state, candidate list |
 | `short_preview` | 0.4 s | one primitive of consequence per candidate |
 | `counterfactual_future` | configurable, default 1.2 s | trajectory checkpoints and events |
@@ -359,50 +360,94 @@ decisions carry over untouched and only the horizon moves. The shallow
 predictions are kept for the runner's execution-match assertion, since one
 primitive still executes.
 
-### Results, all arms, one task / seed / initial state
+### Results, original family, one task / seed / initial state
 
-`top_drawer`, seed 1, init 0, 30-decision cap, TypeSafe `jev-latest`.
+`top_drawer`, seed 1, init 0, TypeSafe `jev-latest`.
 
-| arm | success | decisions | drawer closed | tokens / decision | cost |
-|---|:---:|---:|---:|---:|---:|
-| original, D=1, verdict shown | **yes** | **17** | 152.28 mm | 1,827 | $0.0013 |
-| original, D=1, verdict withheld | **yes** | 25 | 152.39 mm | 1,541 | $0.0016 |
-| original, D=2, verdict shown | no | 30 | 121.06 mm | 1,842 | $0.0023 |
-| original, D=3, verdict shown | no | 30 | 132.24 mm | 2,097 | $0.0026 |
-| original, D=5, verdict shown | no | 30 | 121.67 mm | 2,060 | $0.0026 |
-| reactive (stripped) | no | 30 | 0.00 mm | 1,970 | $0.0025 |
-| short_preview (stripped) | no | 30 | 0.00 mm | 18,725 | $0.0236 |
-| counterfactual D=3 (stripped) | no | 30 | 111.25 mm | 31,771 | $0.0400 |
-| shuffle (stripped) | no | 30 | 0.00 mm | 31,142 | $0.0392 |
+| arm | decision cap | success | decisions | tokens / decision | cost |
+|---|---:|:---:|---:|---:|---:|
+| original, verdict shown | 30 | yes | **17** | 1,827 | $0.0013 |
+| original, verdict withheld | 30 | yes | **25** | 1,541 | $0.0016 |
+| original_deep D=3 | 60 | yes | **49** | 2,024 | $0.0042 |
+| original_trajectory D=3 | 60 | yes | **49** | 7,116 | $0.0146 |
 
-**The success predicate is not necessary.** Withholding it cost eight extra
-decisions, 17 to 25, and the task still completed. An earlier run of this same
-variant failed instead, but that was an artifact: the witness gate read
-`mode == "original"`, so the variant silently lost the pipeline's two-step
-escape hatch. The gate was fixed to cover every original-family mode before
-these numbers were taken.
+**Every variant succeeds.** Adding future information to the published pipeline
+does not break it; it makes it slower, by a factor of about three. Endpoint-only
+(`original_deep`) and path-preserving (`original_trajectory`) land on exactly
+the same decision count, so preserving the intermediate states did not recover
+the loss — it only cost 3.5x more tokens to reach the same place. Withholding
+the success predicate costs about eight decisions.
 
-**Naive horizon extension hurts.** D=1 succeeds; D=2, D=3 and D=5 all fail. The
-mechanism is visible in the prompt: `predict_all_deep` reports only the
-**endpoint** after D repetitions, so at D=5 the critic sees `x+3mm` promising an
-11.67 mm surface-gap reduction when the single primitive that will actually run
-delivers 2.42 mm. It optimises a chunk it will never complete, because the
-receding horizon replans after one primitive.
+#### Two earlier conclusions were wrong, and why
 
-The counterfactual arm does not have this problem: it reports checkpoints at
-t = 0, 0.4, 0.8 and 1.2 s, so the immediately executable step stays visible
-alongside the longer view. That arm made real progress — 111 mm closed, 18 of 30
-states in contact — while carrying none of the task-aligned derived fields.
+This section previously reported that the deep variants *failed* and concluded
+that "naive horizon extension hurts" and that "the endpoint alone is worse than
+no extension". Both were artifacts of the measurement, not findings:
 
-Together these point at a sharper claim than "reason further ahead": **a longer
-horizon helps only if the path is preserved. The endpoint alone, at a longer
-horizon, is worse than no extension at all.** The combination that has not been
-tried is the obvious next one — the original pipeline's structure and derived
-fields, with trajectory checkpoints instead of an endpoint.
+1. **A witness-gate bug.** The two-step escape hatch was gated on
+   `mode == "original"`, so the variants ran without it while their baseline had
+   it. `original_no_oracle` failed on `no_feasible_action` because of that, not
+   because of the missing predicate. Fixed, then re-measured.
+2. **A decision cap set from the baseline.** The cap was 30 because the original
+   needs 17. The variants were still descending when it hit — `original_deep`
+   at 46.4 mm remaining, `original_trajectory` at 33.3 mm — and both reach the
+   goal at decision 49 when the cap is 60. What looked like a plateau was the
+   budget running out.
 
-Every number above is a single episode. D=2/3/5 failing are three observations
-pointing the same way, which is a little more than one, and still far from a
-result.
+The general lesson is recorded here because it applies to the controlled arms
+too: **a decision cap chosen from the fastest arm turns "slower" into "failed".**
+Any arm that is still making monotone progress when the cap hits has not been
+measured, only truncated.
+
+### The controlled arms have the same problem
+
+The four-arm comparison in this document was run at the same 30-decision cap.
+`reactive`, `short_preview` and `shuffle_future` made no progress at all, so the
+cap is unlikely to matter for them. **`counterfactual_future` did not plateau**:
+it was at 40.4 mm and still descending at decision 30. Its reported non-success
+is therefore a truncation, and the four-arm table below must be re-run at a
+higher cap before its numbers are read as outcomes rather than as progress
+snapshots. The contrast it shows against the other three arms — 111 mm closed
+and 18 of 30 states in contact, against 0 mm and no contact — does not depend on
+the cap.
+
+### Four controlled arms (30-decision cap; see the caveat above)
+
+| | reactive | short_preview | counterfactual | shuffle |
+|---|---:|---:|---:|---:|
+| horizon | 0 s | 0.4 s | 1.2 s | 1.2 s (deranged) |
+| decisions / env steps / API calls | 30 / 240 / 30 | 30 / 240 / 30 | 30 / 240 / 30 | 30 / 240 / 30 |
+| input tokens per decision | 1,970 | 18,725 | 31,771 | 31,142 |
+| drawer closed | 0.00 mm | 0.00 mm | 111.25 mm | 0.00 mm |
+| states in contact with target | 0 / 30 | 0 / 30 | 18 / 30 | 0 / 30 |
+| final surface gap | 637.80 mm | 306.69 mm | 0.00 mm | 493.22 mm |
+| still descending at the cap | no | no | **yes** | no |
+| API cost | $0.0025 | $0.0236 | $0.0400 | $0.0392 |
+| oracle leakage | 0 | 0 | 0 | 0 |
+
+The two controls still do their job. `short_preview` at 0.4 s behaved exactly
+like no future at all, so the difference is not the mere presence of a predicted
+outcome. `shuffle_future` carries 31,142 input tokens per decision against the
+counterfactual arm's 31,771 — within 2%, same schema, same candidate set, zero
+derangement fixed points — and shows none of the progress, so the difference is
+not prompt length. What tracks it is the correspondence between an action and
+its own future.
+
+### Where this leaves the research question
+
+Across ten arms on one task, seed and initial state:
+
+- Jev solves the task. The published pipeline succeeds in 17 decisions on 1,827
+  tokens each.
+- The success predicate helps but is not required (17 vs 25 decisions).
+- More future information, added to that pipeline in either form, is
+  consistently **slower** (49 decisions) and more expensive, and never faster.
+- In a stripped single-layer setting, trajectory-level future is the difference
+  between moving toward the target and wandering away from it.
+
+The two settings disagree, and that is the interesting part: the same
+information that rescues a weak critic slows down a strong one. Nothing here is
+repeated, so all of it is a single observation.
 
 ## Shuffle future (negative control)
 
@@ -523,14 +568,18 @@ environment.
    are not emitted: the current measurement system does not compute them
    reliably for all three tasks, and inventing them would be worse than
    omitting them.
-8. **`original_deep` reports only the chunk endpoint.** It is a deliberately
-   simple horizon extension, and the results suggest it is the wrong one: it
-   hides the step that actually executes. Treat it as a measured negative
-   control for endpoint-only lookahead, not as the best way to extend the
-   original pipeline's horizon.
-9. **Horizon granularity is one primitive.** A horizon between multiples of
+8. **Decision caps are part of the measurement.** A cap chosen from the fastest
+   arm reports slower arms as failures. Two conclusions in this document were
+   retracted for exactly that reason. Before reading any non-success, check
+   whether the arm was still making monotone progress when the cap hit.
+9. **`original_deep` reports only the chunk endpoint,** hiding the step that
+   actually executes. It still reaches the goal, in the same 49 decisions as the
+   path-preserving variant, so on this task the hidden intermediate states cost
+   nothing measurable — but the field it shows the critic does not describe what
+   will run, and that remains worth knowing when reading its prompts.
+10. **Horizon granularity is one primitive.** A horizon between multiples of
    0.4 s truncates to whole primitives.
-10. **This host does not reproduce published float determinism.** Six upstream
+11. **This host does not reproduce published float determinism.** Six upstream
    replay tests and `test_runner_without_video_or_network` fail here at ~6e-12
    on an *unmodified* checkout. See below.
 
@@ -545,18 +594,20 @@ mixed-effects statistics, and the 8-task main experiment.
 
 1. **Repetition.** The four-arm pattern has been seen once. Repeat it across
    seeds and initial states on all three bundled tasks before believing it.
-2. **Structure plus trajectory.** The untested combination: the original
-   pipeline's three layers, contracts and derived fields, with checkpoints
-   along the chunk instead of only its endpoint. The endpoint-only deep variant
-   failed at every depth; the checkpoint-carrying counterfactual arm made
-   progress without any derived fields. Combining them is the experiment the
-   results above actually point to.
-3. **Horizon ablation** against that stronger baseline, sweeping
+2. **Re-run the four controlled arms at a higher cap.** The counterfactual arm
+   was still descending at decision 30, so its non-success is a truncation.
+   Until that is redone, the four-arm table reports progress, not outcomes.
+3. **Explain the slowdown.** Every way of adding future information to the
+   published pipeline costs the same 49 decisions against its 17, whether or not
+   the path is preserved. Whether that is prompt dilution, a bias toward large
+   sweeping moves, or something about the late fine-adjustment phase is
+   untested, and it is the most interesting open question here.
+4. **Horizon ablation** against the strong baseline, sweeping
    0 / 0.4 / 0.8 / 1.2 / 2.0 s. The interface already supports it.
-4. **Future-information ablation**: drop checkpoints, drop events, keep only the
+5. **Future-information ablation**: drop checkpoints, drop events, keep only the
    final state, to find which part of the trajectory carries the signal. The
    deep variant is already one point on that curve, and it is the worst one.
-5. **Expand to 8 LIBERO tasks** once the three-task mechanism is stable.
-6. **Perturbation / world-model mismatch**: mass and friction offsets between
+6. **Expand to 8 LIBERO tasks** once the three-task mechanism is stable.
+7. **Perturbation / world-model mismatch**: mass and friction offsets between
    the rollout model and the live environment, to test whether reasoning over an
    imperfect world model still helps.

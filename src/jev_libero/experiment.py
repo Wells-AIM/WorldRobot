@@ -17,6 +17,7 @@ mode "original"; see runner.run.
 
 from .actions import ACTIONS
 from .futures import (
+    ORACLE_MARKERS,
     contains_oracle,
     derangement,
     generate_candidates,
@@ -26,7 +27,11 @@ from .futures import (
 )
 
 CONTROLLED_MODES = ("reactive", "short_preview", "counterfactual_future", "shuffle_future")
-MODES = ("original",) + CONTROLLED_MODES
+# Variants of the published pipeline, used to test it against itself rather than
+# against a stripped-down baseline. Both keep its three layers, its effect
+# contracts and its task-aligned derived fields.
+ORIGINAL_MODES = ("original", "original_no_oracle", "original_deep")
+MODES = ORIGINAL_MODES + CONTROLLED_MODES
 
 # One primitive of the original engine: 8 environment steps at 20 Hz control.
 PRIMITIVE_SECONDS = 0.4
@@ -53,6 +58,52 @@ INSTRUCTIONS = {
     ),
 }
 INSTRUCTIONS["shuffle_future"] = INSTRUCTIONS["counterfactual_future"]
+
+
+def prune_oracle(node):
+    """Recursively drop keys whose name carries the simulator's own verdict."""
+    if isinstance(node, dict):
+        return {
+            key: prune_oracle(value)
+            for key, value in node.items()
+            if not any(marker in str(key).lower() for marker in ORACLE_MARKERS)
+        }
+    if isinstance(node, list):
+        return [prune_oracle(value) for value in node]
+    return node
+
+
+class OracleFilteringAPI:
+    """Wraps a provider and removes oracle fields from every request.
+
+    The published pipeline shows Jev `predicted_task_complete` and
+    `can_finish_task`, both of which are the LIBERO success predicate. Filtering
+    at the transport boundary tests how much of that pipeline's strength comes
+    from the verdict rather than from its structure, without touching
+    `ValidatedPolicy` or the prompts the original mode sends.
+
+    The task effect contracts still consult the predicate when they group
+    candidates; only what reaches Jev is filtered.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    @property
+    def total(self):
+        return self.inner.total
+
+    @property
+    def calls(self):
+        return self.inner.calls
+
+    def choose(self, step, layer, state, instructions, criteria):
+        return self.inner.choose(
+            step, layer, prune_oracle(state), instructions, prune_oracle(criteria)
+        )
+
+    def close(self):
+        self.inner.close()
 
 
 def horizon_for(mode, requested):

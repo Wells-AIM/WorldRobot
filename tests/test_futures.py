@@ -9,7 +9,15 @@ from collections import Counter
 import pytest
 
 from jev_libero.config import load_task
-from jev_libero.experiment import CONTROLLED_MODES, MODES, decide, horizon_for
+from jev_libero.experiment import (
+    CONTROLLED_MODES,
+    MODES,
+    ORIGINAL_MODES,
+    OracleFilteringAPI,
+    decide,
+    horizon_for,
+    prune_oracle,
+)
 from jev_libero.futures import (
     ORACLE_MARKERS,
     allocate,
@@ -157,14 +165,57 @@ def test_horizon_mapping():
         assert horizon_for("shuffle_future", horizon) == horizon
 
 
-def test_modes_include_original_and_four_controlled_arms():
-    assert MODES == ("original", *CONTROLLED_MODES)
+def test_modes_include_the_original_variants_and_four_controlled_arms():
+    assert MODES == (*ORIGINAL_MODES, *CONTROLLED_MODES)
+    assert ORIGINAL_MODES == ("original", "original_no_oracle", "original_deep")
     assert CONTROLLED_MODES == (
         "reactive",
         "short_preview",
         "counterfactual_future",
         "shuffle_future",
     )
+
+
+def test_prune_oracle_keeps_the_task_aligned_fields(recorded):
+    """The no-oracle variant must lose the verdict but keep the physics."""
+    option = {
+        "input": "Move gripper +3 millimeters along WORLD x; hold orientation.",
+        "predicted_task_complete": False,
+        "predicted_closing_mm": 0.0,
+        "predicted_surface_gap_reduction_mm": 2.42,
+        "predicted_target_contact": False,
+        "predicted_obstacle_peak_force_N": 0.0,
+    }
+    pruned = prune_oracle(option)
+    assert "predicted_task_complete" not in pruned
+    assert pruned["predicted_surface_gap_reduction_mm"] == 2.42
+    assert pruned["predicted_target_contact"] is False
+    assert contains_oracle(pruned) == []
+    nested = {"a": {"can_finish_task": True, "keep": 1}, "b": [{"terminal_success": 1, "x": 2}]}
+    assert prune_oracle(nested) == {"a": {"keep": 1}, "b": [{"x": 2}]}
+
+
+def test_oracle_filtering_api_strips_real_recorded_requests(records_root):
+    """Replay the published prompts through the filter and check what survives."""
+    calls = read_jsonl(records_root / "top_drawer_seed1" / "api.jsonl")
+    leaky = [c for c in calls if contains_oracle(c["request"]["questions"][c["layer"]]["criteria"])]
+    assert leaky, "the published pipeline should expose the success predicate"
+    inner = MockJev()
+    api = OracleFilteringAPI(inner)
+    for call in calls:
+        layer = call["layer"]
+        question = call["request"]["questions"][layer]
+        api.choose(
+            call["step"],
+            layer,
+            call["request"]["state"],
+            question["instructions"],
+            question["criteria"],
+        )
+    for request in inner.requests:
+        assert contains_oracle(request["state"]) == []
+        assert contains_oracle(request["criteria"]) == []
+    assert api.calls == len(calls)
 
 
 def test_reactive_prompt_carries_no_future_and_no_oracle(recorded):

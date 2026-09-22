@@ -66,7 +66,7 @@ def run(
     future_horizon_s=1.2,
     shuffle_seed=0,
 ):
-    from .experiment import MODES, decide, horizon_for
+    from .experiment import MODES, ORIGINAL_MODES, OracleFilteringAPI, decide, horizon_for
     from .world import World
 
     cfg = load_task(task)
@@ -89,10 +89,10 @@ def run(
             "provider": provider,
             "cost_basis": COST_BASIS.get(provider, "reported API cost"),
             "experiment_mode": mode,
-            "candidate_count": candidate_count if mode != "original" else None,
-            "candidate_depth": candidate_depth if mode != "original" else None,
+            "candidate_count": candidate_count if mode not in ORIGINAL_MODES else None,
+            "candidate_depth": candidate_depth if mode not in ORIGINAL_MODES else None,
             "future_horizon_requested_s": None
-            if mode == "original"
+            if mode in ORIGINAL_MODES
             else horizon_for(mode, future_horizon_s),
             "shuffle_seed": shuffle_seed if mode == "shuffle_future" else None,
             "candidate_controls": ACTIONS,
@@ -128,6 +128,8 @@ def run(
             if provider == "mock"
             else Decisions(out, budget_usd=budget_usd, key_file=key_file, provider=provider)
         )
+        if mode == "original_no_oracle":
+            api = OracleFilteringAPI(api)
         world = World(
             init_index=init_state,
             render=render,
@@ -152,6 +154,11 @@ def run(
             start = time.perf_counter()
             before, predictions = world.predict_all(grip)
             second_branches = 0
+            # The deep variant reasons over a chunk but still executes one
+            # primitive, so the shallow predictions stay for the execution check.
+            deep = None
+            if mode == "original_deep":
+                _, deep = world.predict_all_deep(grip, candidate_depth)
             needs_witnesses = mode == "original" and lookahead == 2
             if needs_witnesses and not contracts(before, predictions, True, cfg)[0]:
                 witnesses, second_branches = world.two_step_witnesses(grip)
@@ -166,12 +173,13 @@ def run(
                     "predictions": predictions,
                     "prediction_seconds": prediction_time,
                     "two_step_evaluations": second_branches,
+                    **({"deep_predictions": deep, "chunk_depth": candidate_depth} if deep else {}),
                 },
             )
             start = time.perf_counter()
             experiment_record = None
-            if mode == "original":
-                choice, routing = policy.choose(api, step, before, predictions)
+            if mode in ORIGINAL_MODES:
+                choice, routing = policy.choose(api, step, before, deep or predictions)
             else:
                 choice, experiment_record = decide(
                     api,
@@ -227,7 +235,7 @@ def run(
             )
             success = after["success"]
             policy.feedback(choice, before, after)
-            if mode != "original":
+            if mode not in ORIGINAL_MODES:
                 controlled_history.append(policy.history[-1])
             record = {
                 "step": step,
@@ -283,7 +291,7 @@ def run(
                 frames[-1].save(out / "latest.png")
             routing_label = (
                 f"{policy.intent} / {policy.strategy}"
-                if mode == "original"
+                if mode in ORIGINAL_MODES
                 else f"{mode} / {experiment_record['selected_candidate']}"
             )
             print(
@@ -338,10 +346,10 @@ def run(
             "initial_state": init_state,
             "seed": seed,
             "experiment_mode": mode,
-            "candidate_count": candidate_count if mode != "original" else None,
-            "candidate_depth": candidate_depth if mode != "original" else None,
+            "candidate_count": candidate_count if mode not in ORIGINAL_MODES else None,
+            "candidate_depth": candidate_depth if mode not in ORIGINAL_MODES else None,
             "future_horizon_requested_s": None
-            if mode == "original"
+            if mode in ORIGINAL_MODES
             else horizon_for(mode, future_horizon_s),
             "rollout_steps_total": sum(r.get("rollout_steps_total", 0) for r in records),
             "rollout_latency_ms_total": round(

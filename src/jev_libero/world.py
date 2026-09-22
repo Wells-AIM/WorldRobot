@@ -267,6 +267,54 @@ class World:
             snapshot.restore()
         return before, predictions
 
+    def predict_all_deep(self, grip=-1.0, depth=3):
+        """predict_all over a chunk of `depth` repetitions of each input.
+
+        Identical in shape to predict_all, so the declarative prediction and
+        policy projections carry over unchanged: only the horizon moves. Used by
+        the original pipeline to reason further ahead without altering its
+        prompt structure, its contracts, or its layered decisions.
+        """
+        if depth < 1:
+            raise ValueError("Use a positive chunk depth.")
+        snapshot = Snapshot(self)
+        before = self.features()
+        predictions = {}
+        try:
+            for name in ACTIONS:
+                snapshot.restore()
+                steps = 0
+                peak = 0.0
+                pairs = set()
+                chunk_grip = grip
+                for _ in range(depth):
+                    result = self.execute(name, chunk_grip)
+                    chunk_grip = result["grip"]
+                    steps += result["steps"]
+                    peak = max(peak, result["peak_obstacle_force_N"])
+                    pairs.update(map(tuple, result["obstacle_pairs_seen"]))
+                    if result["features"]["success"]:
+                        break
+                f = result["features"]
+                predictions[name] = {
+                    "after": f,
+                    **project(self.config["predictions"], {"before": before, "after": f}),
+                    "geometry_approach_mm": before["distance_to_moving_geometry_mm"]
+                    - f["distance_to_moving_geometry_mm"],
+                    "eef_displacement_mm": float(
+                        np.linalg.norm(np.array(f["eef_mm"]) - before["eef_mm"])
+                    ),
+                    "gap_change_mm": f["finger_gap_mm"] - before["finger_gap_mm"],
+                    "peak_obstacle_force_N": peak,
+                    "obstacle_pairs_seen": sorted(pairs),
+                    "steps": steps,
+                    "chunk_depth": depth,
+                    "sim_state_after": self.env.sim.get_state().flatten().tolist(),
+                }
+        finally:
+            snapshot.restore()
+        return before, predictions
+
     def two_step_witnesses(self, grip=-1.0):
         """Evaluate safe two-primitive branches; return witnesses, never execute a plan."""
         from .policy import blocked_pairs, contracts

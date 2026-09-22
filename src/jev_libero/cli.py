@@ -46,7 +46,13 @@ def main(argv=None):
         dest="future_horizon_s",
         help="Simulated future horizon in seconds for counterfactual_future/shuffle_future",
     )
-    live.add_argument("--candidate-count", type=int, default=6)
+    live.add_argument(
+        "--candidate-count",
+        type=int,
+        default=27,
+        help="Candidate chunks per decision, capped at the feasible pool. The default 27 "
+        "offers every feasible input, which removes the sampler as a confound",
+    )
     live.add_argument("--candidate-depth", type=int, default=3)
     live.add_argument("--shuffle-seed", type=int, default=0)
     live.add_argument(

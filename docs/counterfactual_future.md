@@ -21,7 +21,7 @@ The original `jev-libero` **already performs local physics preview**. Claiming
 | | original | CF-Jev |
 |---|---|---|
 | branch mechanism | reversible MuJoCo `Snapshot` | the same `Snapshot`, reused |
-| breadth | all 27 atomic inputs | K configurable candidates (default 6) |
+| breadth | all 27 atomic inputs | K configurable candidates (default 27 = all feasible) |
 | depth | 1 primitive (0.4 s) | D primitives to a configurable horizon (default 1.2 s) |
 | second step | `two_step_witnesses`, only when no contract passes | always, as part of the trajectory |
 | what Jev receives | scalar effect fields of the end state, plus a two-step witness | timed checkpoints and physical events across the trajectory |
@@ -93,16 +93,50 @@ Candidates are generated once per decision, from state alone, by
    (`reject_new_obstacles`, `require_obstacle_free_endpoint`). Rejections are
    recorded per decision in `hard_rejected`.
 3. Surviving inputs are grouped by `policy.family` (contact mode × motion kind).
-4. K first inputs are taken **round-robin across families** in the fixed
-   `ACTIONS` order. No score, no reward, no success predicate is consulted.
+4. K slots are allocated across families by largest remainder **in proportion to
+   family size**, and picks are spread across each family including its
+   endpoints. No score, no reward, no success predicate is consulted.
 5. Each first input is extended to depth D by repetition: `[a, a, a]`.
 
-Because step 5 depends only on the state, the candidate set is identical across
-all four arms by construction. This is asserted offline
+Because selection depends only on the state, the candidate set is identical
+across all four arms by construction. This is asserted offline
 (`test_candidate_set_is_identical_across_controlled_modes`) and against live
 physics (`test_candidate_sets_match_across_modes_on_live_physics`), and a
 further test flips the success predicate on every prediction and shows the
 candidate set does not move.
+
+### Why K defaults to 27
+
+The default offers **every feasible input**, which removes the sampler from the
+experiment entirely. That matters more than it looks, and the reason is worth
+recording.
+
+The first implementation took candidates round-robin across families. At the
+`top_drawer` start state the feasible pool is 18 translations, 6 rotations,
+2 finger inputs and 1 hold, so round-robin returned a six-item menu holding a
+**single** translation — while every large approach move lives in the
+translation family. The one translation that made the cut, `x-40mm`, retreats
+from the target. A real Jev run then made ten decisions and zero task progress,
+not because future reasoning failed but because no useful action was ever
+offered.
+
+Proportional allocation fixes the shape of the menu, but measurement at the same
+state shows K=6 is still too small to cover 27 inputs:
+
+| K | best approach on the menu | top-5 approach moves offered |
+|---|---|---|
+| 6 | 0.14 mm | none |
+| 8 | 7.89 mm | 2 of 5 |
+| 12 | 29.11 mm | 3 of 5 |
+| 27 | 29.11 mm | all |
+
+A menu that rarely contains a good action floors every arm at zero success and
+leaves the comparison with no headroom — the experiment would measure nothing.
+K=27 costs 27 × D × 8 environment steps per decision (648 at D=3, about 10.7 s
+on CPU) and is linear in K, not the forbidden exponential `27^D` search.
+
+Smaller K remains available via `--candidate-count` for cost-constrained sweeps,
+and `allocate`/`spread` keep the menu proportional at any K.
 
 **Limitation.** Depth extension by repetition is a deliberate v1 choice: it is
 deterministic, reward-free, and asks exactly "what if the robot keeps doing
@@ -219,6 +253,77 @@ Each decision logs `future_horizon_requested_s`, `future_horizon_actual_s`, and
 `simulated_steps`, because a primitive can terminate early and the actual
 horizon then falls short of the request.
 
+### Compute cost vs future horizon (measured)
+
+Ten decisions per cell, K=6, chunk depth matched to the horizon, mock provider,
+CPU. `tools/` sweep across all three bundled tasks:
+
+| horizon (s) | rollout steps | rollout ms / decision |
+|---:|---:|---:|
+| 0.0 | 0 | 0 |
+| 0.4 | 480 | ~775 |
+| 0.8 | 960 | ~1560 |
+| 1.2 | 1440 | ~2310 |
+| 2.0 | 2400 | ~3840 |
+
+Cost is linear in the horizon at about **1950 ms per simulated second** per
+decision, consistent across `microwave`, `top_drawer` and `alphabet_soup`.
+Executed environment steps stayed at 80 in every cell, so the live budget is
+controlled while only the counterfactual cost moves.
+
+At the K=27 default the same relationship holds with the constant scaled by
+27/6: 648 rollout steps and ~10.7 s per decision at a 1.2 s horizon.
+
+API cost scales with K too. Measured on TypeSafe at K=27, D=3, 1.2 s horizon:
+**32,385 input tokens per decision**, about $0.00136 per decision at the
+published $0.042/M input price.
+
+## First real-Jev observation (n=1, not a result)
+
+`top_drawer`, seed 1, init state 0, K=27, D=3, 1.2 s horizon, 30 decisions,
+TypeSafe `jev-latest`. Both arms share the task, the initial state, the seed,
+the candidate generator, the primitives, the feasibility rules and the decision
+cap; only the future information differs.
+
+| | reactive | counterfactual_future |
+|---|---:|---:|
+| LIBERO success | no | no |
+| decisions / env steps / API calls | 30 / 240 / 30 | 30 / 240 / 30 |
+| drawer closed | **0.00 mm** | **111.25 mm** |
+| remaining at end | 151.66 mm | 40.40 mm |
+| ever contacted the target | no | yes |
+| API cost | $0.0025 | $0.0400 |
+| rollout steps | 0 | 19,320 |
+| oracle leakage | 0 | 0 |
+
+Neither arm reached the LIBERO predicate in 30 decisions. The reactive arm made
+**no task progress at all** and never touched the drawer; the counterfactual arm
+closed 73% of the opening.
+
+**This is one episode per arm and must not be read as evidence.** It is a single
+observation on a single task, seed and initial state, with no repetition. It is
+reported because it shows the pipeline produces a usable signal, not because it
+answers the research question.
+
+Two controls are missing and both are load-bearing:
+
+- **`short_preview`** would separate *trajectory-level* future from *any*
+  future. Without it, the gap above is equally consistent with one primitive of
+  lookahead being enough.
+- **`shuffle_future`** would separate reasoning over futures from the mere
+  presence of more tokens. Without it, nothing rules out that a longer prompt
+  helps regardless of which future belongs to which action.
+
+Until those two arms run, with repetition across seeds and initial states, the
+honest summary is: the mechanism works end to end and produces a difference
+worth measuring properly.
+
+A note on the recorded `candidate_count`: it varies between 25 and 27 across
+decisions because the hard collision rules reject a few inputs in some states,
+and the two arms visit different states once their choices diverge. Candidate
+parity is a per-state property — identical candidates given identical state —
+and that is what the tests assert.
+
 ## Shuffle future (negative control)
 
 Futures are generated normally, then reassigned by a **derangement** — a
@@ -316,22 +421,28 @@ environment.
 
 1. **Depth extension is repetition.** A candidate is one primitive repeated D
    times, not a searched sequence. Mixed-primitive chunks are unexplored.
-2. **Cost.** A CF decision at K=6, D=3 simulates 144 environment steps for the
-   futures on top of the 216 the original 27-input preview already spends. In
-   the pilot this was ~2.3 s of rollout per decision on CPU.
-3. **Mock results are not Jev results.** Everything reported here from
-   `--provider mock` validates the pipeline, not the hypothesis. Nothing can be
-   said about whether counterfactual reasoning helps until real Jev episodes run.
-4. **`original` still leaks.** The published pipeline shows Jev
+2. **Cost.** At the K=27 default a CF decision simulates 648 environment steps
+   for the futures on top of the 216 the original 27-input preview already
+   spends — about 10.7 s of rollout per decision on CPU, and ~32k input tokens
+   per API call at a 1.2 s horizon.
+3. **Mock results are not Jev results.** Anything reported from
+   `--provider mock` validates the pipeline, not the hypothesis. The mock
+   chooser is random; its episodes never succeed and must never be read as
+   evidence about future reasoning.
+4. **The candidate budget is a live confound at small K.** K=27 avoids it, but
+   any sweep that lowers K to save compute reintroduces it, and a menu that
+   misses the task-relevant actions floors every arm. Check the measured
+   coverage table above before trusting a small-K comparison.
+5. **`original` still leaks.** The published pipeline shows Jev
    `predicted_task_complete` and `can_finish_task`. It was left untouched for
    reproducibility, so `original` is not leak-comparable with the controlled arms.
-5. **Events are generic.** `object_dropped`, `joint_limit`, and `IK failure`
+6. **Events are generic.** `object_dropped`, `joint_limit`, and `IK failure`
    are not emitted: the current measurement system does not compute them
    reliably for all three tasks, and inventing them would be worse than
    omitting them.
-6. **Horizon granularity is one primitive.** A horizon between multiples of
+7. **Horizon granularity is one primitive.** A horizon between multiples of
    0.4 s truncates to whole primitives.
-7. **This host does not reproduce published float determinism.** Six upstream
+8. **This host does not reproduce published float determinism.** Six upstream
    replay tests and `test_runner_without_video_or_network` fail here at ~6e-12
    on an *unmodified* checkout. See below.
 

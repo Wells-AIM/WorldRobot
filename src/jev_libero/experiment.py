@@ -73,7 +73,7 @@ def decide(
     predictions,
     grip,
     task_config,
-    candidate_count=6,
+    candidate_count=27,
     candidate_depth=3,
     future_horizon_s=1.2,
     shuffle_seed=0,

@@ -278,51 +278,61 @@ API cost scales with K too. Measured on TypeSafe at K=27, D=3, 1.2 s horizon:
 **32,385 input tokens per decision**, about $0.00136 per decision at the
 published $0.042/M input price.
 
-## First real-Jev observation (n=1, not a result)
+## First real-Jev run: all four arms (n=1, not yet a result)
 
-`top_drawer`, seed 1, init state 0, K=27, D=3, 1.2 s horizon, 30 decisions,
-TypeSafe `jev-latest`. Both arms share the task, the initial state, the seed,
-the candidate generator, the primitives, the feasibility rules and the decision
-cap; only the future information differs.
+`top_drawer`, seed 1, init state 0, K=27, D=3, 30 decisions, TypeSafe
+`jev-latest`. Every arm shares the task, the initial state, the seed, the
+candidate generator, the candidate budget, the primitives, the feasibility rules
+and the decision cap. Only the future information differs.
 
-| | reactive | counterfactual_future |
-|---|---:|---:|
-| LIBERO success | no | no |
-| decisions / env steps / API calls | 30 / 240 / 30 | 30 / 240 / 30 |
-| drawer closed | **0.00 mm** | **111.25 mm** |
-| remaining at end | 151.66 mm | 40.40 mm |
-| ever contacted the target | no | yes |
-| API cost | $0.0025 | $0.0400 |
-| rollout steps | 0 | 19,320 |
-| oracle leakage | 0 | 0 |
+| | reactive | short_preview | counterfactual | shuffle |
+|---|---:|---:|---:|---:|
+| horizon | 0 s | 0.4 s | 1.2 s | 1.2 s (deranged) |
+| decisions / env steps / API calls | 30 / 240 / 30 | 30 / 240 / 30 | 30 / 240 / 30 | 30 / 240 / 30 |
+| input tokens per decision | 1,970 | 18,725 | 31,771 | 31,142 |
+| **drawer closed** | **0.00 mm** | **0.00 mm** | **111.25 mm** | **0.00 mm** |
+| states in contact with target | 0 / 30 | 0 / 30 | **18 / 30** | 0 / 30 |
+| minimum surface gap | 93.48 mm | 81.17 mm | **0.00 mm** | 93.48 mm |
+| final surface gap | 637.80 mm | 306.69 mm | **0.00 mm** | 493.22 mm |
+| LIBERO success | no | no | no | no |
+| API cost | $0.0025 | $0.0236 | $0.0400 | $0.0392 |
+| oracle leakage | 0 | 0 | 0 | 0 |
 
-Neither arm reached the LIBERO predicate in 30 decisions. The reactive arm made
-**no task progress at all** and never touched the drawer; the counterfactual arm
-closed 73% of the opening.
+No arm reached the LIBERO predicate within 30 decisions. Only the
+counterfactual arm approached the drawer at all: the other three drifted away
+from it, ending 3x to 7x further from the target surface than they started.
 
-**This is one episode per arm and must not be read as evidence.** It is a single
-observation on a single task, seed and initial state, with no repetition. It is
-reported because it shows the pipeline produces a usable signal, not because it
-answers the research question.
+The two controls do the work they were built for:
 
-Two controls are missing and both are load-bearing:
+- **`short_preview` rules out "any lookahead helps."** One primitive of
+  consequence (0.4 s) performed exactly like no consequence at all. Whatever
+  produced the difference, it is not the mere presence of a predicted outcome.
+- **`shuffle_future` rules out "more tokens help."** It carries 31,142 input
+  tokens per decision against the counterfactual arm's 31,771 — within 2% — with
+  the same schema, the same candidate set and the same checkpoint count. Only
+  the action-to-future correspondence is broken, and the progress disappears
+  entirely. The derangement was verified to have zero fixed points across all
+  30 decisions.
 
-- **`short_preview`** would separate *trajectory-level* future from *any*
-  future. Without it, the gap above is equally consistent with one primitive of
-  lookahead being enough.
-- **`shuffle_future`** would separate reasoning over futures from the mere
-  presence of more tokens. Without it, nothing rules out that a longer prompt
-  helps regardless of which future belongs to which action.
+So the difference tracks the **correspondence between an action and its own
+multi-step future**, not prompt length and not lookahead per se.
 
-Until those two arms run, with repetition across seeds and initial states, the
-honest summary is: the mechanism works end to end and produces a difference
-worth measuring properly.
+**This is still one episode per arm.** One task, one seed, one initial state, no
+repetition. A single episode cannot separate "counterfactual reasoning helps"
+from "this particular rollout got lucky", and four arms at n=1 give no error
+bars. The result is reported because the control pattern is coherent and the
+mechanism is verified end to end, not because the question is answered.
+
+What it would take to make this a result: repetition across seeds and initial
+states, all three bundled tasks, and the full horizon sweep, so that the
+reactive / 0.4 s / 1.2 s / shuffle ordering can be shown to hold rather than
+observed once.
 
 A note on the recorded `candidate_count`: it varies between 25 and 27 across
 decisions because the hard collision rules reject a few inputs in some states,
-and the two arms visit different states once their choices diverge. Candidate
-parity is a per-state property — identical candidates given identical state —
-and that is what the tests assert.
+and the arms visit different states once their choices diverge. Candidate parity
+is a per-state property — identical candidates given identical state — and that
+is what the tests assert.
 
 ## Shuffle future (negative control)
 
@@ -425,24 +435,27 @@ environment.
    for the futures on top of the 216 the original 27-input preview already
    spends — about 10.7 s of rollout per decision on CPU, and ~32k input tokens
    per API call at a 1.2 s horizon.
-3. **Mock results are not Jev results.** Anything reported from
+3. **n=1 everywhere.** The four-arm comparison above is a single episode per
+   arm on one task, one seed and one initial state. There are no error bars and
+   no repetition, so it cannot separate a real effect from one lucky rollout.
+4. **Mock results are not Jev results.** Anything reported from
    `--provider mock` validates the pipeline, not the hypothesis. The mock
    chooser is random; its episodes never succeed and must never be read as
    evidence about future reasoning.
-4. **The candidate budget is a live confound at small K.** K=27 avoids it, but
+5. **The candidate budget is a live confound at small K.** K=27 avoids it, but
    any sweep that lowers K to save compute reintroduces it, and a menu that
    misses the task-relevant actions floors every arm. Check the measured
    coverage table above before trusting a small-K comparison.
-5. **`original` still leaks.** The published pipeline shows Jev
+6. **`original` still leaks.** The published pipeline shows Jev
    `predicted_task_complete` and `can_finish_task`. It was left untouched for
    reproducibility, so `original` is not leak-comparable with the controlled arms.
-6. **Events are generic.** `object_dropped`, `joint_limit`, and `IK failure`
+7. **Events are generic.** `object_dropped`, `joint_limit`, and `IK failure`
    are not emitted: the current measurement system does not compute them
    reliably for all three tasks, and inventing them would be worse than
    omitting them.
-7. **Horizon granularity is one primitive.** A horizon between multiples of
+8. **Horizon granularity is one primitive.** A horizon between multiples of
    0.4 s truncates to whole primitives.
-8. **This host does not reproduce published float determinism.** Six upstream
+9. **This host does not reproduce published float determinism.** Six upstream
    replay tests and `test_runner_without_video_or_network` fail here at ~6e-12
    on an *unmodified* checkout. See below.
 
@@ -455,8 +468,8 @@ mixed-effects statistics, and the 8-task main experiment.
 
 ## Next stage
 
-1. **Real Jev episodes** on the three bundled tasks, several init states and
-   seeds, at a controlled budget — the only way to get a real answer.
+1. **Repetition.** The four-arm pattern has been seen once. Repeat it across
+   seeds and initial states on all three bundled tasks before believing it.
 2. **Horizon ablation**: sweep 0 / 0.4 / 0.8 / 1.2 / 2.0 s for success rate vs
    horizon and compute cost vs horizon. The interface already supports it.
 3. **Future-information ablation**: drop checkpoints, drop events, keep only the

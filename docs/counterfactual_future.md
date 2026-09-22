@@ -67,6 +67,8 @@ how much future consequence information the critic receives.
 | mode | horizon | what the critic sees |
 |---|---|---|
 | `original` | 0.4 s (+ 2-step witness) | the published three-layer pipeline, untouched |
+| `original_no_oracle` | same | the same pipeline with the success predicate filtered out |
+| `original_deep` | D primitives | the same pipeline previewing a chunk endpoint instead of one primitive |
 | `reactive` | none | task, current state, candidate list |
 | `short_preview` | 0.4 s | one primitive of consequence per candidate |
 | `counterfactual_future` | configurable, default 1.2 s | trajectory checkpoints and events |
@@ -334,6 +336,74 @@ and the arms visit different states once their choices diverge. Candidate parity
 is a per-state property — identical candidates given identical state — and that
 is what the tests assert.
 
+## Testing the published pipeline against itself
+
+The four controlled arms measure future information against a baseline that had
+been stripped of the published pipeline's three decision layers, its effect
+contracts and its task-aligned derived fields. That answers a question about the
+stripped setup, not about the real system. Two variants change exactly one thing
+about the published pipeline instead.
+
+`original_no_oracle` routes the provider through `OracleFilteringAPI`, which
+drops `ORACLE_MARKERS` keys from the state and criteria at the transport
+boundary. `predicted_task_complete` and `can_finish_task` disappear;
+`predicted_closing_mm`, the surface-gap reduction and the contact flags stay.
+Instruction text is left alone — the phrase "task progress" there frames the
+objective rather than ranking candidates, and rewriting it would move a second
+variable.
+
+`original_deep` previews each input over D repetitions through
+`World.predict_all_deep`. The prediction and policy projections are declarative
+over `before`/`after`, so the prompt structure, the contracts and the layered
+decisions carry over untouched and only the horizon moves. The shallow
+predictions are kept for the runner's execution-match assertion, since one
+primitive still executes.
+
+### Results, all arms, one task / seed / initial state
+
+`top_drawer`, seed 1, init 0, 30-decision cap, TypeSafe `jev-latest`.
+
+| arm | success | decisions | drawer closed | tokens / decision | cost |
+|---|:---:|---:|---:|---:|---:|
+| original, D=1, verdict shown | **yes** | **17** | 152.28 mm | 1,827 | $0.0013 |
+| original, D=1, verdict withheld | **yes** | 25 | 152.39 mm | 1,541 | $0.0016 |
+| original, D=2, verdict shown | no | 30 | 121.06 mm | 1,842 | $0.0023 |
+| original, D=3, verdict shown | no | 30 | 132.24 mm | 2,097 | $0.0026 |
+| original, D=5, verdict shown | no | 30 | 121.67 mm | 2,060 | $0.0026 |
+| reactive (stripped) | no | 30 | 0.00 mm | 1,970 | $0.0025 |
+| short_preview (stripped) | no | 30 | 0.00 mm | 18,725 | $0.0236 |
+| counterfactual D=3 (stripped) | no | 30 | 111.25 mm | 31,771 | $0.0400 |
+| shuffle (stripped) | no | 30 | 0.00 mm | 31,142 | $0.0392 |
+
+**The success predicate is not necessary.** Withholding it cost eight extra
+decisions, 17 to 25, and the task still completed. An earlier run of this same
+variant failed instead, but that was an artifact: the witness gate read
+`mode == "original"`, so the variant silently lost the pipeline's two-step
+escape hatch. The gate was fixed to cover every original-family mode before
+these numbers were taken.
+
+**Naive horizon extension hurts.** D=1 succeeds; D=2, D=3 and D=5 all fail. The
+mechanism is visible in the prompt: `predict_all_deep` reports only the
+**endpoint** after D repetitions, so at D=5 the critic sees `x+3mm` promising an
+11.67 mm surface-gap reduction when the single primitive that will actually run
+delivers 2.42 mm. It optimises a chunk it will never complete, because the
+receding horizon replans after one primitive.
+
+The counterfactual arm does not have this problem: it reports checkpoints at
+t = 0, 0.4, 0.8 and 1.2 s, so the immediately executable step stays visible
+alongside the longer view. That arm made real progress — 111 mm closed, 18 of 30
+states in contact — while carrying none of the task-aligned derived fields.
+
+Together these point at a sharper claim than "reason further ahead": **a longer
+horizon helps only if the path is preserved. The endpoint alone, at a longer
+horizon, is worse than no extension at all.** The combination that has not been
+tried is the obvious next one — the original pipeline's structure and derived
+fields, with trajectory checkpoints instead of an endpoint.
+
+Every number above is a single episode. D=2/3/5 failing are three observations
+pointing the same way, which is a little more than one, and still far from a
+result.
+
 ## Shuffle future (negative control)
 
 Futures are generated normally, then reassigned by a **derangement** — a
@@ -435,9 +505,9 @@ environment.
    for the futures on top of the 216 the original 27-input preview already
    spends — about 10.7 s of rollout per decision on CPU, and ~32k input tokens
    per API call at a 1.2 s horizon.
-3. **n=1 everywhere.** The four-arm comparison above is a single episode per
-   arm on one task, one seed and one initial state. There are no error bars and
-   no repetition, so it cannot separate a real effect from one lucky rollout.
+3. **n=1 everywhere.** Every arm reported here is a single episode on one task,
+   one seed and one initial state. There are no error bars and no repetition, so
+   none of it can separate a real effect from one lucky rollout.
 4. **Mock results are not Jev results.** Anything reported from
    `--provider mock` validates the pipeline, not the hypothesis. The mock
    chooser is random; its episodes never succeed and must never be read as
@@ -453,9 +523,14 @@ environment.
    are not emitted: the current measurement system does not compute them
    reliably for all three tasks, and inventing them would be worse than
    omitting them.
-8. **Horizon granularity is one primitive.** A horizon between multiples of
+8. **`original_deep` reports only the chunk endpoint.** It is a deliberately
+   simple horizon extension, and the results suggest it is the wrong one: it
+   hides the step that actually executes. Treat it as a measured negative
+   control for endpoint-only lookahead, not as the best way to extend the
+   original pipeline's horizon.
+9. **Horizon granularity is one primitive.** A horizon between multiples of
    0.4 s truncates to whole primitives.
-9. **This host does not reproduce published float determinism.** Six upstream
+10. **This host does not reproduce published float determinism.** Six upstream
    replay tests and `test_runner_without_video_or_network` fail here at ~6e-12
    on an *unmodified* checkout. See below.
 
@@ -470,11 +545,18 @@ mixed-effects statistics, and the 8-task main experiment.
 
 1. **Repetition.** The four-arm pattern has been seen once. Repeat it across
    seeds and initial states on all three bundled tasks before believing it.
-2. **Horizon ablation**: sweep 0 / 0.4 / 0.8 / 1.2 / 2.0 s for success rate vs
-   horizon and compute cost vs horizon. The interface already supports it.
-3. **Future-information ablation**: drop checkpoints, drop events, keep only the
-   final state, to find which part of the trajectory carries the signal.
-4. **Expand to 8 LIBERO tasks** once the three-task mechanism is stable.
-5. **Perturbation / world-model mismatch**: mass and friction offsets between
+2. **Structure plus trajectory.** The untested combination: the original
+   pipeline's three layers, contracts and derived fields, with checkpoints
+   along the chunk instead of only its endpoint. The endpoint-only deep variant
+   failed at every depth; the checkpoint-carrying counterfactual arm made
+   progress without any derived fields. Combining them is the experiment the
+   results above actually point to.
+3. **Horizon ablation** against that stronger baseline, sweeping
+   0 / 0.4 / 0.8 / 1.2 / 2.0 s. The interface already supports it.
+4. **Future-information ablation**: drop checkpoints, drop events, keep only the
+   final state, to find which part of the trajectory carries the signal. The
+   deep variant is already one point on that curve, and it is the worst one.
+5. **Expand to 8 LIBERO tasks** once the three-task mechanism is stable.
+6. **Perturbation / world-model mismatch**: mass and friction offsets between
    the rollout model and the live environment, to test whether reasoning over an
    imperfect world model still helps.

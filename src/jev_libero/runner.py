@@ -159,11 +159,15 @@ def run(
             deep = None
             if mode == "original_deep":
                 _, deep = world.predict_all_deep(grip, candidate_depth)
-            needs_witnesses = mode == "original" and lookahead == 2
-            if needs_witnesses and not contracts(before, predictions, True, cfg)[0]:
+            # Witnesses are the pipeline's escape hatch when no contract passes.
+            # Every original-family variant gets them on the same terms, so the
+            # variants differ only in the one thing each is meant to change.
+            offered = deep if deep else predictions
+            needs_witnesses = mode in ORIGINAL_MODES and lookahead == 2
+            if needs_witnesses and not contracts(before, offered, True, cfg)[0]:
                 witnesses, second_branches = world.two_step_witnesses(grip)
                 for name, witness in witnesses.items():
-                    predictions[name]["reposition_witness"] = witness
+                    offered[name]["reposition_witness"] = witness
             prediction_time = time.perf_counter() - start
             append_json(
                 out / "predictions.jsonl",
@@ -179,7 +183,7 @@ def run(
             start = time.perf_counter()
             experiment_record = None
             if mode in ORIGINAL_MODES:
-                choice, routing = policy.choose(api, step, before, deep or predictions)
+                choice, routing = policy.choose(api, step, before, offered)
             else:
                 choice, experiment_record = decide(
                     api,

@@ -2,6 +2,7 @@
 
 import json
 import os
+import random
 import time
 from pathlib import Path
 
@@ -19,6 +20,49 @@ TYPESAFE_INPUT_USD_PER_MILLION = 0.042
 
 class BudgetExceeded(RuntimeError):
     pass
+
+
+class MockDecisions:
+    """Deterministic offline stand-in. MOCK OUTPUT — never Jev's behaviour.
+
+    Exists so the counterfactual pipeline can be exercised end to end with no
+    network, no credentials, and no spend. Its choices are a seeded shuffle of
+    the offered options; they say nothing about how Jev would decide, and runs
+    made with it must never be reported as Jev results.
+    """
+
+    provider = "mock"
+
+    def __init__(self, out, budget_usd=0.0, key_file=None, model=None, session=None, seed=0, **_):
+        self.out = Path(out)
+        self.total = 0.0
+        self.calls = 0
+        self.seed = seed
+
+    def choose(self, step, layer, state, instructions, criteria):
+        options = list(criteria)
+        if not options:
+            raise ValueError(f"No options offered for {layer}")
+        index = random.Random(f"{self.seed}:{step}:{layer}").randrange(len(options))
+        choice = options[index]
+        self.calls += 1
+        append_json(
+            self.out / "api.jsonl",
+            {
+                "step": step,
+                "layer": layer,
+                "request": {"model": "mock", "state": state, "questions": {layer: {
+                    "type": "choice", "instructions": instructions, "criteria": criteria}}},
+                "response": {"answers": {layer: {"choice": choice}}, "usage": {"cost": 0.0}},
+                "mock_output": True,
+                "http_status": None,
+                "latency_s": 0.0,
+            },
+        )
+        return choice
+
+    def close(self):
+        pass
 
 
 def append_json(path, record):

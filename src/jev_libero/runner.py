@@ -12,9 +12,15 @@ from PIL import Image, ImageDraw
 
 from . import __version__
 from .actions import ACTIONS
-from .client import BudgetExceeded, Decisions, append_json
+from .client import BudgetExceeded, Decisions, MockDecisions, append_json
 from .config import load_task, project
 from .policy import NoFeasibleAction, ValidatedPolicy, contracts
+
+COST_BASIS = {
+    "typesafe": "token-price estimate",
+    "openrouter": "reported API cost",
+    "mock": "no API calls; deterministic mock provider",
+}
 
 
 def save_json(path, value):
@@ -54,12 +60,20 @@ def run(
     config_dir=None,
     key_file=None,
     provider="openrouter",
+    mode="original",
+    candidate_count=6,
+    candidate_depth=3,
+    future_horizon_s=1.2,
+    shuffle_seed=0,
 ):
+    from .experiment import MODES, decide, horizon_for
     from .world import World
 
     cfg = load_task(task)
     if max_decisions < 1 or budget_usd <= 0 or lookahead not in (1, 2):
         raise ValueError("Use positive decision/budget limits and lookahead 1 or 2.")
+    if mode not in MODES:
+        raise ValueError(f"Unknown experiment mode: {mode}; use one of {MODES}")
     out = Path(out).expanduser()
     out.mkdir(parents=True, exist_ok=False)  # Never overwrite or accidentally rebill a run.
     save_json(out / "task_config.json", cfg)
@@ -73,7 +87,14 @@ def run(
             "max_decisions": max_decisions,
             "budget_usd": budget_usd,
             "provider": provider,
-            "cost_basis": "token-price estimate" if provider == "typesafe" else "reported API cost",
+            "cost_basis": COST_BASIS.get(provider, "reported API cost"),
+            "experiment_mode": mode,
+            "candidate_count": candidate_count if mode != "original" else None,
+            "candidate_depth": candidate_depth if mode != "original" else None,
+            "future_horizon_requested_s": None
+            if mode == "original"
+            else horizon_for(mode, future_horizon_s),
+            "shuffle_seed": shuffle_seed if mode == "shuffle_future" else None,
             "candidate_controls": ACTIONS,
             "horizon_environment_steps": 8,
             "collision_aware": True,
@@ -95,13 +116,18 @@ def run(
     progress_key = display["progress_field"]
     world = api = None
     frames, states, commands, records, frame_ends = [], [], [], [], []
+    controlled_history = []
     grip = -1.0
     success = False
     error = None
     termination = "decision_limit"
     final = None
     try:
-        api = Decisions(out, budget_usd=budget_usd, key_file=key_file, provider=provider)
+        api = (
+            MockDecisions(out, seed=seed)
+            if provider == "mock"
+            else Decisions(out, budget_usd=budget_usd, key_file=key_file, provider=provider)
+        )
         world = World(
             init_index=init_state,
             render=render,
@@ -126,7 +152,8 @@ def run(
             start = time.perf_counter()
             before, predictions = world.predict_all(grip)
             second_branches = 0
-            if lookahead == 2 and not contracts(before, predictions, True, cfg)[0]:
+            needs_witnesses = mode == "original" and lookahead == 2
+            if needs_witnesses and not contracts(before, predictions, True, cfg)[0]:
                 witnesses, second_branches = world.two_step_witnesses(grip)
                 for name, witness in witnesses.items():
                     predictions[name]["reposition_witness"] = witness
@@ -142,8 +169,37 @@ def run(
                 },
             )
             start = time.perf_counter()
-            choice, routing = policy.choose(api, step, before, predictions)
+            experiment_record = None
+            if mode == "original":
+                choice, routing = policy.choose(api, step, before, predictions)
+            else:
+                choice, experiment_record = decide(
+                    api,
+                    world,
+                    step,
+                    mode,
+                    before,
+                    predictions,
+                    grip,
+                    cfg,
+                    candidate_count=candidate_count,
+                    candidate_depth=candidate_depth,
+                    future_horizon_s=future_horizon_s,
+                    shuffle_seed=shuffle_seed,
+                    history=controlled_history,
+                )
+                routing = {
+                    "intent": None,
+                    "strategy": None,
+                    "reviewed_intent": False,
+                    "eligible_by_intent": {},
+                    "eligible_motor": [c["candidate_id"] for c in experiment_record["candidates"]],
+                    "rejected": experiment_record["hard_rejected"],
+                }
+                append_json(out / "counterfactual.jsonl", {"step": step, **experiment_record})
             decision_time = time.perf_counter() - start
+            # Receding horizon: a candidate chunk may plan several primitives,
+            # but only its first one ever reaches the live environment.
             executed = world.execute(choice, grip, record=True)
             grip = executed["grip"]
             after = executed["features"]
@@ -171,6 +227,8 @@ def run(
             )
             success = after["success"]
             policy.feedback(choice, before, after)
+            if mode != "original":
+                controlled_history.append(policy.history[-1])
             record = {
                 "step": step,
                 "choice": choice,
@@ -189,6 +247,21 @@ def run(
                 "decision_seconds": decision_time,
                 "two_step_evaluations": second_branches,
             }
+            if experiment_record is not None:
+                record.update(
+                    {
+                        "experiment_mode": mode,
+                        "selected_candidate": experiment_record["selected_candidate"],
+                        "candidate_count": experiment_record["candidate_count"],
+                        "candidate_depth": experiment_record["candidate_depth"],
+                        "future_horizon_requested_s": experiment_record[
+                            "future_horizon_requested_s"
+                        ],
+                        "future_horizon_actual_s": experiment_record["future_horizon_actual_s"],
+                        "rollout_latency_ms": experiment_record["rollout_latency_ms"],
+                        "rollout_steps_total": experiment_record["rollout_steps_total"],
+                    }
+                )
             records.append(record)
             append_json(out / "trace.jsonl", record)
             append_json(
@@ -208,8 +281,13 @@ def run(
             )
             if frames:
                 frames[-1].save(out / "latest.png")
+            routing_label = (
+                f"{policy.intent} / {policy.strategy}"
+                if mode == "original"
+                else f"{mode} / {experiment_record['selected_candidate']}"
+            )
             print(
-                f"{step + 1:03d} {policy.intent} / {policy.strategy} / {choice}: "
+                f"{step + 1:03d} {routing_label} / {choice}: "
                 f"{display['label']}={after[value_key]:.4f}{display['unit']} "
                 f"success={success} cost=${api.total:.6f}",
                 flush=True,
@@ -256,9 +334,19 @@ def run(
             "strategy_calls": policy.strategy_calls,
             "cost_usd": api.total if api else 0.0,
             "provider": provider,
-            "cost_basis": "token-price estimate" if provider == "typesafe" else "reported API cost",
+            "cost_basis": COST_BASIS.get(provider, "reported API cost"),
             "initial_state": init_state,
             "seed": seed,
+            "experiment_mode": mode,
+            "candidate_count": candidate_count if mode != "original" else None,
+            "candidate_depth": candidate_depth if mode != "original" else None,
+            "future_horizon_requested_s": None
+            if mode == "original"
+            else horizon_for(mode, future_horizon_s),
+            "rollout_steps_total": sum(r.get("rollout_steps_total", 0) for r in records),
+            "rollout_latency_ms_total": round(
+                sum(r.get("rollout_latency_ms", 0.0) for r in records), 3
+            ),
             "task_config_name": cfg["name"],
             "final_task_value": final[value_key] if final else None,
             "task_value_unit": display["unit"],

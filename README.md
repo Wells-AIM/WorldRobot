@@ -150,6 +150,32 @@ Jev chooses among those candidates. If a useful move needs repositioning first, 
 
 [Architecture and implementation details →](docs/architecture.md)
 
+## Counterfactual future reasoning (research mode)
+
+An additive research layer asks how far into the future an embodied agent should
+reason before acting. Four controlled arms share the task, the initial state,
+the candidate generator, the primitives, and the feasibility rules, and differ
+only in how much future consequence the critic sees:
+
+| mode | horizon | critic sees |
+|---|---|---|
+| `reactive` | none | task, current state, candidates |
+| `short_preview` | 0.4 s | one primitive of consequence |
+| `counterfactual_future` | configurable, default 1.2 s | trajectory checkpoints and events |
+| `shuffle_future` | same | the same futures, deranged (negative control) |
+
+```bash
+jev-libero run --task top_drawer --mode counterfactual_future \
+  --future-horizon 1.2 --candidate-depth 3 --candidate-count 6 \
+  --provider mock --seed 1 --init-state 0 --out runs/cf
+```
+
+`--mode original` (the default) is the published pipeline, unchanged. MuJoCo is
+used as an oracle / simulator-based world model, **not** a learned neural world
+model, and the LIBERO success predicate is withheld from the controlled arms.
+
+[Counterfactual future reasoning →](docs/counterfactual_future.md)
+
 ## Recorded results
 
 One recorded example passing the original LIBERO criterion per bundled task:

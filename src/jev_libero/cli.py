@@ -6,6 +6,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import TASKS, load_task
+from .experiment import MODES
 
 
 def main(argv=None):
@@ -32,9 +33,31 @@ def main(argv=None):
     live.add_argument("--budget-usd", type=float, default=0.10)
     live.add_argument("--lookahead", type=int, choices=(1, 2), default=2)
     live.add_argument(
+        "--mode",
+        choices=MODES,
+        default="original",
+        help="original keeps the published three-layer pipeline; the others are controlled "
+        "experiment arms that differ only in how much future consequence Jev sees",
+    )
+    live.add_argument(
+        "--future-horizon",
+        type=float,
+        default=1.2,
+        dest="future_horizon_s",
+        help="Simulated future horizon in seconds for counterfactual_future/shuffle_future",
+    )
+    live.add_argument("--candidate-count", type=int, default=6)
+    live.add_argument("--candidate-depth", type=int, default=3)
+    live.add_argument("--shuffle-seed", type=int, default=0)
+    live.add_argument(
         "--no-render", action="store_true", help="Save controls/state, but no GIF or camera frames"
     )
-    live.add_argument("--provider", choices=("openrouter", "typesafe"), default="openrouter")
+    live.add_argument(
+        "--provider",
+        choices=("openrouter", "typesafe", "mock"),
+        default="openrouter",
+        help="mock is a deterministic offline stand-in: no network, no spend, and NOT Jev",
+    )
     live.add_argument(
         "--api-key-file",
         type=Path,
@@ -80,6 +103,11 @@ def main(argv=None):
             config_dir=args.libero_config_dir,
             key_file=args.api_key_file,
             provider=args.provider,
+            mode=args.mode,
+            candidate_count=args.candidate_count,
+            candidate_depth=args.candidate_depth,
+            future_horizon_s=args.future_horizon_s,
+            shuffle_seed=args.shuffle_seed,
         )
         print(json.dumps(result, indent=2))
         return 0 if result["success"] else 1

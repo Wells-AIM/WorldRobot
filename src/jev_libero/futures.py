@@ -126,13 +126,58 @@ class CounterfactualRollout:
         }
 
 
+def allocate(sizes, count):
+    """Largest-remainder allocation of `count` slots proportional to `sizes`.
+
+    Round-robin over families would over-represent tiny families: with 18
+    translations, 6 rotations, 2 finger inputs and 1 hold, it handed Jev a menu
+    that was five-sixths non-translation and excluded every large approach move.
+    Proportional allocation keeps the menu shaped like the feasible pool.
+    """
+    total = sum(sizes.values())
+    exact = {key: size * count / total for key, size in sizes.items()}
+    floors = {key: min(int(value), sizes[key]) for key, value in exact.items()}
+    # Every family keeps at least one slot while slots remain, so the menu still
+    # spans the available motion kinds.
+    for key in sorted(sizes, key=lambda k: (-sizes[k], k)):
+        if sum(floors.values()) >= count:
+            break
+        if floors[key] == 0:
+            floors[key] = 1
+    remaining = count - sum(floors.values())
+    order = sorted(exact, key=lambda k: (-(exact[k] - floors[k]), -sizes[k], k))
+    index = 0
+    while remaining > 0 and any(floors[k] < sizes[k] for k in sizes):
+        key = order[index % len(order)]
+        if floors[key] < sizes[key]:
+            floors[key] += 1
+            remaining -= 1
+        index += 1
+    while sum(floors.values()) > count:
+        key = max(sorted(floors), key=lambda k: (floors[k], -sizes[k]))
+        floors[key] -= 1
+    return floors
+
+
+def spread(members, slots):
+    """Evenly spaced picks across an ordered family, endpoints included."""
+    if slots >= len(members):
+        return list(members)
+    if slots == 1:
+        return [members[0]]
+    step = (len(members) - 1) / (slots - 1)
+    return [members[round(i * step)] for i in range(slots)]
+
+
 def generate_candidates(predictions, feasible, count, depth):
     """Deterministic, mode-independent candidate chunks.
 
     Selection never reads the LIBERO reward, the success predicate, or any task
-    score: first inputs are taken round-robin across predicted motion families in
-    the fixed `ACTIONS` order, which keeps the set identical for every
-    experiment mode given the same state.
+    score — only the feasible set, the predicted motion family, and the fixed
+    `ACTIONS` ordering. Slots are allocated proportionally across families and
+    spread within each family, so the menu covers the action space rather than
+    the first few entries of it. The result is identical for every experiment
+    mode given the same state.
     """
     if count < 1 or depth < 1:
         raise ValueError("Use a positive candidate count and depth.")
@@ -140,15 +185,10 @@ def generate_candidates(predictions, feasible, count, depth):
     grouped = {}
     for name in order:
         grouped.setdefault(family(name, predictions[name]), []).append(name)
-    picked = []
-    families = sorted(grouped)
-    while len(picked) < count and any(grouped[key] for key in families):
-        for key in families:
-            if not grouped[key]:
-                continue
-            picked.append(grouped[key].pop(0))
-            if len(picked) == count:
-                break
+    sizes = {key: len(value) for key, value in grouped.items()}
+    slots = allocate(sizes, min(count, len(order)))
+    picked = [name for key in sorted(grouped) for name in spread(grouped[key], slots[key])]
+    picked.sort(key=order.index)
     return [
         CandidateSequence(
             candidate_id=f"C{index + 1}",

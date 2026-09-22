@@ -4,18 +4,23 @@ Recorded predictions from examples/records supply real physics data, so
 candidate generation and prompt construction are exercised without LIBERO.
 """
 
+from collections import Counter
+
 import pytest
 
 from jev_libero.config import load_task
 from jev_libero.experiment import CONTROLLED_MODES, MODES, decide, horizon_for
 from jev_libero.futures import (
     ORACLE_MARKERS,
+    allocate,
     contains_oracle,
     derangement,
     generate_candidates,
     hard_feasible,
+    spread,
     strip_oracle,
 )
+from jev_libero.policy import family
 from jev_libero.records import read_jsonl
 
 
@@ -223,6 +228,55 @@ def test_recent_outcomes_are_stripped_of_the_success_predicate(recorded):
     assert all("success" not in entry for entry in state["recent_real_outcomes"])
     assert all("actual_closing_mm" in entry for entry in state["recent_real_outcomes"])
     assert contains_oracle(state) == []
+
+
+def test_allocation_is_proportional_not_round_robin(recorded):
+    """Regression: round-robin gave a menu that excluded every approach move.
+
+    At the top_drawer start state the feasible pool is 18 translations, 6
+    rotations, 2 finger inputs and 1 hold. Round-robin handed Jev one single
+    translation out of six candidates; proportional allocation keeps the menu
+    shaped like the pool.
+    """
+    cfg, rows = recorded
+    feasible, _ = hard_feasible(rows[0]["before"], rows[0]["predictions"], cfg)
+    sizes = Counter(
+        family(name, rows[0]["predictions"][name]).split("__")[1] for name in feasible
+    )
+    assert sizes["translation"] > sizes["rotation"] > sizes["finger"]
+    candidates = generate_candidates(rows[0]["predictions"], feasible, 6, 3)
+    kinds = Counter(c.family.split("__")[1] for c in candidates)
+    assert kinds["translation"] >= 4, kinds
+    assert kinds["translation"] > kinds["rotation"], kinds
+
+
+def test_allocate_respects_totals_and_capacity():
+    sizes = {"translation": 18, "rotation": 6, "finger": 2, "hold": 1}
+    for count in range(1, 28):
+        slots = allocate(sizes, count)
+        assert sum(slots.values()) == count, (count, slots)
+        assert all(slots[key] <= sizes[key] for key in sizes), (count, slots)
+        assert all(value >= 0 for value in slots.values()), (count, slots)
+    assert allocate(sizes, 27) == sizes
+
+
+def test_spread_covers_both_endpoints():
+    assert spread(list(range(18)), 4) == [0, 6, 11, 17]
+    assert spread([1, 2, 3], 5) == [1, 2, 3]
+    assert spread([1, 2, 3], 1) == [1]
+
+
+def test_larger_candidate_budgets_cover_more_of_the_action_space(recorded):
+    """K=6 cannot cover 27 inputs; the menu must widen as K grows."""
+    cfg, rows = recorded
+    feasible, _ = hard_feasible(rows[0]["before"], rows[0]["predictions"], cfg)
+    seen = {}
+    for count in (6, 12, 27):
+        names = {c.first_input for c in generate_candidates(rows[0]["predictions"], feasible, count, 1)}
+        seen[count] = names
+        assert len(names) == min(count, len(feasible))
+    assert seen[6] < seen[12] or len(seen[6] - seen[12]) <= 2
+    assert seen[27] == set(feasible)
 
 
 def test_oracle_markers_cover_the_original_leaky_fields():

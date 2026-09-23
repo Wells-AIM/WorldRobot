@@ -174,6 +174,7 @@ def test_modes_include_the_original_variants_and_four_controlled_arms():
         "original_no_oracle",
         "original_deep",
         "original_trajectory",
+        "strong_policy_future",
     )
     assert CONTROLLED_MODES == (
         "reactive",
@@ -396,7 +397,7 @@ def test_chunk_continuation_shapes_the_sequence():
     assert chunk_actions("x+40mm", 3, "repeat") == ["x+40mm"] * 3
     assert chunk_actions("x+40mm", 3, "hold") == ["x+40mm", "hold", "hold"]
     assert chunk_actions("x+40mm", 1, "hold") == ["x+40mm"]
-    assert set(CONTINUATIONS) == {"repeat", "hold"}
+    assert set(CONTINUATIONS) == {"repeat", "hold", "policy_consistent"}
     with pytest.raises(ValueError):
         chunk_actions("x+40mm", 3, "search")
 

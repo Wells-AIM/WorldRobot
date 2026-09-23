@@ -6,8 +6,8 @@ from pathlib import Path
 
 from . import __version__
 from .config import TASKS, load_task
+from .continuation import CONTINUATIONS
 from .experiment import MODES
-from .futures import CONTINUATIONS
 
 
 def main(argv=None):
@@ -62,6 +62,19 @@ def main(argv=None):
         default="repeat",
         help="How a candidate chunk continues past its first input. repeat saturates "
         "for large steps and hides their advantage; hold lets the action settle",
+    )
+    live.add_argument(
+        "--future-representation",
+        choices=("full", "compact"),
+        default="full",
+        help="compact reports each quantity as its path and each contact fact as its "
+        "transitions, instead of repeating absolute state at every checkpoint",
+    )
+    live.add_argument(
+        "--shuffle-future-arm",
+        action="store_true",
+        help="negative control: derange trajectory-to-candidate correspondence, "
+        "keeping the candidate set, the one-step fields and the token volume identical",
     )
     live.add_argument(
         "--no-render", action="store_true", help="Save controls/state, but no GIF or camera frames"
@@ -123,6 +136,8 @@ def main(argv=None):
             future_horizon_s=args.future_horizon_s,
             shuffle_seed=args.shuffle_seed,
             chunk_continuation=args.chunk_continuation,
+            future_representation=args.future_representation,
+            shuffle_future_arm=args.shuffle_future_arm,
         )
         print(json.dumps(result, indent=2))
         return 0 if result["success"] else 1

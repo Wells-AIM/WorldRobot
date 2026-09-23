@@ -35,7 +35,26 @@ ORIGINAL_MODES = (
     "original_no_oracle",
     "original_deep",
     "original_trajectory",
+    # Stage 1.5: the strong one-step baseline plus a future, differing from it
+    # in exactly one thing. S1 == original_no_oracle; the arms below add a
+    # trajectory on top without touching the one-step fields.
+    "strong_policy_future",
 )
+
+# Stage 1.5 arms, by the names the report uses.
+STAGE15_ARMS = {
+    "S1": {"mode": "original_no_oracle"},
+    "S1+Repeat": {"mode": "strong_policy_future", "continuation": "repeat",
+                  "representation": "full"},
+    "S1+Hold": {"mode": "strong_policy_future", "continuation": "hold",
+                "representation": "full"},
+    "S1+PolicyFull": {"mode": "strong_policy_future", "continuation": "policy_consistent",
+                      "representation": "full"},
+    "S1+PolicyCompact": {"mode": "strong_policy_future", "continuation": "policy_consistent",
+                         "representation": "compact"},
+    "S1+PolicyShuffle": {"mode": "strong_policy_future", "continuation": "policy_consistent",
+                         "representation": "compact", "shuffle": True},
+}
 MODES = ORIGINAL_MODES + CONTROLLED_MODES
 
 # One primitive of the original engine: 8 environment steps at 20 Hz control.
@@ -111,8 +130,84 @@ class OracleFilteringAPI:
         self.inner.close()
 
 
+def compact_future(result, task_config):
+    """Only what the trajectory adds beyond the one-step fields beside it.
+
+    Absolute state repeated at every checkpoint is mostly the same numbers three
+    times. This reports each quantity as its path, and each contact fact as its
+    transitions, so the added tokens carry added information.
+    """
+    points = result.checkpoints
+    if len(points) < 2:
+        return None
+    tracked = ["distance_to_moving_geometry_mm", "finger_gap_mm"]
+    tracked += [
+        key
+        for key in (task_config or {}).get("features", {})
+        if key in points[0] and isinstance(points[0][key], (int, float))
+    ]
+    paths = {}
+    for key in tracked:
+        series = [round(float(point[key]), 2) for point in points if key in point]
+        if len(set(series)) > 1:
+            paths[key] = series
+    contact = [bool(point["moving_contact"]) for point in points]
+    obstacle = [bool(point["obstacle_contact"]) for point in points]
+    summary = {
+        "t_s": [round(point["t_s"], 2) for point in points],
+        "paths": paths,
+    }
+    if len(set(contact)) > 1:
+        summary["target_contact"] = contact
+    else:
+        summary["target_contact_throughout"] = contact[0]
+    if any(obstacle):
+        summary["non_target_contact"] = obstacle
+    if result.events:
+        summary["events"] = [f"{e['event']}@{e['t_s']}s" for e in result.events]
+    return summary
+
+
+def future_novelty(result, immediate):
+    """Diagnostic only: what the trajectory shows that the first step did not.
+
+    Never enters a prompt and never ranks a candidate. It exists so the analysis
+    can say whether a longer future carried anything new at all.
+    """
+    points = result.checkpoints
+    if len(points) < 2:
+        return {"future_novelty_count": 0, "signals": []}
+    first, last = points[0], points[-1]
+    one = points[1] if len(points) > 1 else last
+    signals = []
+    if bool(one["moving_contact"]) != bool(last["moving_contact"]):
+        signals.append("target_contact_changes_after_first_step")
+    if bool(one["obstacle_contact"]) != bool(last["obstacle_contact"]):
+        signals.append("non_target_contact_changes_after_first_step")
+    for key in ("distance_to_moving_geometry_mm",):
+        if key in first and key in one and key in last:
+            early = one[key] - first[key]
+            late = last[key] - one[key]
+            if early * late < 0:
+                signals.append(f"{key}_reverses")
+            elif abs(late) > abs(early) * 1.5:
+                signals.append(f"{key}_accelerates")
+    if len(result.events) > sum(1 for e in result.events if e["t_s"] <= one["t_s"] + 1e-9):
+        signals.append("events_appear_after_first_step")
+    if len(set(result.actions)) > 1:
+        signals.append("continuation_diverges_from_first_input")
+    return {"future_novelty_count": len(signals), "signals": signals}
+
+
 def attach_trajectories(
-    world, predictions, grip, depth, task_config, horizon=None, continuation="repeat"
+    world,
+    predictions,
+    grip,
+    depth,
+    task_config,
+    horizon=None,
+    continuation="repeat",
+    representation="full",
 ):
     """Add a `trajectory` field to each prediction, in place.
 
@@ -121,32 +216,156 @@ def attach_trajectories(
     difference `original_deep` got wrong — it replaced the executable step with
     a chunk endpoint, and lost every intermediate state.
 
-    Returns (simulated_steps, latency_ms) for the decision record.
+    Returns (simulated_steps, latency_ms, diagnostics) for the decision record.
     """
+    from .continuation import make_continuation
     from .futures import CandidateSequence, chunk_actions, rollout_all
 
+    policy = make_continuation(continuation)
     candidates = [
         CandidateSequence(
             candidate_id=name,
-            actions=chunk_actions(name, depth, continuation),
+            actions=chunk_actions(name, depth, "repeat"),
             family="",
             first_input=name,
         )
         for name in predictions
     ]
-    rollouts = rollout_all(world, candidates, grip, horizon, task_config)
+    rollouts = rollout_all(
+        world, candidates, grip, horizon, task_config, continuation=policy, depth=depth
+    )
+    diagnostics = {}
     for name, result in rollouts.items():
-        # Checkpoint 0 is the current state, already in the prompt's `before`.
+        if representation == "compact":
+            body = compact_future(result, task_config)
+        else:
+            # Checkpoint 0 is the current state, already in the prompt's `before`.
+            body = {"checkpoints": result.checkpoints[1:], "events": result.events}
         predictions[name]["trajectory"] = {
             "horizon_s": round(result.horizon_seconds, 3),
             "continuation": continuation,
-            "checkpoints": result.checkpoints[1:],
-            "events": result.events,
+            **(body or {}),
+        }
+        diagnostics[name] = {
+            "simulated_actions": result.actions,
+            "continuation_reasons": result.continuation_reasons,
+            **future_novelty(result, predictions[name]),
         }
     return (
         sum(r.horizon_steps for r in rollouts.values()),
         round(sum(r.rollout_latency_ms for r in rollouts.values()), 3),
+        diagnostics,
     )
+
+
+def approx_tokens(value):
+    """Character-based token estimate. Marked estimated wherever it is reported.
+
+    The provider returns only a total, so the split between base prompt,
+    immediate consequence and future trajectory is approximated here rather
+    than measured. Ratios between arms are the usable part, not absolutes.
+    """
+    import json
+
+    if value is None:
+        return 0
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return max(1, round(len(text) / 4))
+
+
+def token_budget(state, instructions, criteria):
+    """Estimated split of one request into base / immediate / future."""
+    future, immediate = 0, 0
+    for option in (criteria or {}).values():
+        if not isinstance(option, dict):
+            continue
+        for key, body in option.items():
+            if key in ("future", "future_trajectory", "trajectory"):
+                future += approx_tokens(body)
+            else:
+                immediate += approx_tokens({key: body})
+    return {
+        "estimated": True,
+        "base_tokens": approx_tokens(state) + approx_tokens(instructions),
+        "immediate_tokens": immediate,
+        "future_tokens": future,
+        "total_tokens": approx_tokens(state)
+        + approx_tokens(instructions)
+        + immediate
+        + future,
+    }
+
+
+class TokenAccountingAPI:
+    """Records the estimated prompt split for every request, then forwards it."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.budgets = []
+
+    @property
+    def total(self):
+        return self.inner.total
+
+    @property
+    def calls(self):
+        return self.inner.calls
+
+    def choose(self, step, layer, state, instructions, criteria):
+        self.budgets.append(
+            {"step": step, "layer": layer, **token_budget(state, instructions, criteria)}
+        )
+        return self.inner.choose(step, layer, state, instructions, criteria)
+
+    def close(self):
+        self.inner.close()
+
+
+class ShufflingTrajectoryAPI:
+    """Deranges trajectory-to-candidate correspondence just before transport.
+
+    Everything else — the candidate set, the one-step fields, the generated
+    futures, the schema and the token volume — is identical to the arm it is
+    the control for. Only which future sits beside which action changes.
+    """
+
+    def __init__(self, inner, seed=0):
+        self.inner = inner
+        self.seed = seed
+        self.assignments = []
+
+    @property
+    def total(self):
+        return self.inner.total
+
+    @property
+    def calls(self):
+        return self.inner.calls
+
+    def choose(self, step, layer, state, instructions, criteria):
+        from .futures import derangement
+
+        carriers = [
+            name
+            for name, option in (criteria or {}).items()
+            if isinstance(option, dict) and "future_trajectory" in option
+        ]
+        if len(carriers) > 1:
+            mapping = derangement(carriers, self.seed + step)
+            futures = {name: criteria[name]["future_trajectory"] for name in carriers}
+            criteria = {
+                name: (
+                    {**option, "future_trajectory": futures[mapping[name]]}
+                    if name in carriers
+                    else option
+                )
+                for name, option in criteria.items()
+            }
+            self.assignments.append({"step": step, "layer": layer, "mapping": mapping})
+        return self.inner.choose(step, layer, state, instructions, criteria)
+
+    def close(self):
+        self.inner.close()
 
 
 def horizon_for(mode, requested):

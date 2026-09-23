@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .actions import ACTIONS
+from .continuation import CONTINUATIONS
 from .policy import blocked_pairs, family
 
 # Substrings forbidden anywhere in a future summary handed to Jev. Keeping the
@@ -107,6 +108,8 @@ class CounterfactualRollout:
     horizon_steps: int = 0
     horizon_seconds: float = 0.0
     primitives_simulated: int = 0
+    continuation: str = "precomputed"
+    continuation_reasons: list = field(default_factory=list)
     checkpoints: list = field(default_factory=list)
     events: list = field(default_factory=list)
     summary: dict = field(default_factory=dict)
@@ -119,6 +122,8 @@ class CounterfactualRollout:
             "simulated_steps": self.horizon_steps,
             "duration_s": round(self.horizon_seconds, 6),
             "primitives_simulated": self.primitives_simulated,
+            "continuation": self.continuation,
+            "continuation_reasons": self.continuation_reasons,
             "latency_ms": round(self.rollout_latency_ms, 3),
             "checkpoints": self.checkpoints,
             "events": self.events,
@@ -169,9 +174,6 @@ def spread(members, slots):
     return [members[round(i * step)] for i in range(slots)]
 
 
-CONTINUATIONS = ("repeat", "hold")
-
-
 def chunk_actions(name, depth, continuation="repeat"):
     """The action sequence whose future is shown for `name`.
 
@@ -188,6 +190,8 @@ def chunk_actions(name, depth, continuation="repeat"):
         raise ValueError(f"Unknown chunk continuation: {continuation}")
     if continuation == "hold":
         return [name] + ["hold"] * (depth - 1)
+    # policy_consistent decides from the branch state, so the precomputed list
+    # is only a placeholder of the right length; rollout replaces it.
     return [name] * depth
 
 
@@ -241,17 +245,30 @@ def hard_feasible(before, predictions, task_config):
     return feasible, rejected
 
 
-def rollout(world, candidate, grip, horizon_seconds, task_config, snapshot=None):
-    """Simulate one candidate chunk from `snapshot`, then restore the live state.
+def rollout(
+    world,
+    candidate,
+    grip,
+    horizon_seconds,
+    task_config,
+    snapshot=None,
+    continuation=None,
+    depth=None,
+):
+    """Simulate one candidate from `snapshot`, then restore the live state.
 
-    The live environment is always restored, including on error, so no
-    counterfactual can contaminate the real episode.
+    With a `continuation` policy the chunk is decided one primitive at a time
+    from the branch state, which is what receding-horizon control actually does;
+    without one the candidate's precomputed `actions` list is replayed. The live
+    environment is always restored, including on error, so no counterfactual can
+    contaminate the real episode.
     """
     import time
 
     from .world import Snapshot
 
     root = snapshot or Snapshot(world)
+    budget = depth if depth is not None else len(candidate.actions)
     start_time = float(world.data.time)
     began = time.perf_counter()
     initial = world.features()
@@ -265,6 +282,8 @@ def rollout(world, candidate, grip, horizon_seconds, task_config, snapshot=None)
         }
     ]
     events = []
+    taken = []
+    reasons = []
     steps = 0
     primitives = 0
     # Measured before the restore below: restoring rewinds world.data.time too.
@@ -272,11 +291,21 @@ def rollout(world, candidate, grip, horizon_seconds, task_config, snapshot=None)
     try:
         current_grip = grip
         previous = initial
-        for index, name in enumerate(candidate.actions):
+        for index in range(budget):
             if horizon_seconds is not None and float(world.data.time) - start_time >= (
                 horizon_seconds - 1e-9
             ):
                 break
+            if index == 0:
+                name, reason = candidate.first_input, {"rule": "candidate_first_input"}
+            elif continuation is not None:
+                name, reason = continuation.choose_next_action(
+                    world, candidate.first_input, current_grip, index, task_config
+                )
+            else:
+                name, reason = candidate.actions[index], {"rule": "precomputed_chunk"}
+            taken.append(name)
+            reasons.append({"step": index, "input": name, **reason})
             result = world.execute(name, current_grip)
             current_grip = result["grip"]
             steps += result["steps"]
@@ -333,7 +362,9 @@ def rollout(world, candidate, grip, horizon_seconds, task_config, snapshot=None)
             summary[f"net_{key}_change"] = round(float(final[key]) - float(first[key]), 4)
     return CounterfactualRollout(
         candidate_id=candidate.candidate_id,
-        actions=list(candidate.actions),
+        actions=taken,
+        continuation=continuation.name if continuation is not None else "precomputed",
+        continuation_reasons=reasons,
         horizon_steps=steps,
         horizon_seconds=round(elapsed, 6),
         primitives_simulated=primitives,
@@ -344,7 +375,8 @@ def rollout(world, candidate, grip, horizon_seconds, task_config, snapshot=None)
     )
 
 
-def rollout_all(world, candidates, grip, horizon_seconds, task_config):
+def rollout_all(world, candidates, grip, horizon_seconds, task_config, continuation=None,
+                depth=None):
     """Roll out every candidate from one shared snapshot of the live state."""
     from .world import Snapshot
 
@@ -354,7 +386,14 @@ def rollout_all(world, candidates, grip, horizon_seconds, task_config):
         for candidate in candidates:
             root.restore()
             rollouts[candidate.candidate_id] = rollout(
-                world, candidate, grip, horizon_seconds, task_config, snapshot=root
+                world,
+                candidate,
+                grip,
+                horizon_seconds,
+                task_config,
+                snapshot=root,
+                continuation=continuation,
+                depth=depth,
             )
     finally:
         root.restore()

@@ -23,6 +23,19 @@ COST_BASIS = {
 }
 
 
+PHASES = (("far", 50.0, float("inf")), ("mid", 20.0, 50.0),
+          ("near", 5.0, 20.0), ("terminal", float("-inf"), 5.0))
+
+
+def phase_of(remaining):
+    """Which distance band a decision was taken in. Stage-1 located the
+    slowdown between 5 and 20 mm, so the bands are reported per decision."""
+    for name, low, high in PHASES:
+        if low <= remaining < high:
+            return name
+    return "terminal"
+
+
 def save_json(path, value):
     Path(path).write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -66,11 +79,15 @@ def run(
     future_horizon_s=1.2,
     shuffle_seed=0,
     chunk_continuation="repeat",
+    future_representation="full",
+    shuffle_future_arm=False,
 ):
     from .experiment import (
         MODES,
         ORIGINAL_MODES,
         OracleFilteringAPI,
+        ShufflingTrajectoryAPI,
+        TokenAccountingAPI,
         attach_trajectories,
         decide,
         horizon_for,
@@ -143,8 +160,14 @@ def run(
             if provider == "mock"
             else Decisions(out, budget_usd=budget_usd, key_file=key_file, provider=provider)
         )
-        if mode == "original_no_oracle":
+        # strong_policy_future is S1 plus a trajectory, so it filters the
+        # oracle exactly as S1 does; the trajectory is the only difference.
+        if mode in ("original_no_oracle", "strong_policy_future"):
             api = OracleFilteringAPI(api)
+        if mode == "strong_policy_future" and shuffle_future_arm:
+            api = ShufflingTrajectoryAPI(api, seed=shuffle_seed)
+        api = TokenAccountingAPI(api)
+        budgets = api.budgets
         world = World(
             init_index=init_state,
             render=render,
@@ -173,10 +196,11 @@ def run(
             # primitive, so the shallow predictions stay for the execution check.
             deep = None
             rollout_steps = rollout_ms = 0
+            continuation_diag = None
             if mode == "original_deep":
                 _, deep = world.predict_all_deep(grip, candidate_depth)
-            elif mode == "original_trajectory":
-                rollout_steps, rollout_ms = attach_trajectories(
+            elif mode in ("original_trajectory", "strong_policy_future"):
+                rollout_steps, rollout_ms, continuation_diag = attach_trajectories(
                     world,
                     predictions,
                     grip,
@@ -184,6 +208,7 @@ def run(
                     cfg,
                     future_horizon_s,
                     chunk_continuation,
+                    future_representation,
                 )
             # Witnesses are the pipeline's escape hatch when no contract passes.
             # Every original-family variant gets them on the same terms, so the
@@ -286,16 +311,39 @@ def run(
                 "decision_seconds": decision_time,
                 "two_step_evaluations": second_branches,
             }
-            if mode == "original_trajectory":
+            if mode in ("original_trajectory", "strong_policy_future"):
                 record.update(
                     {
                         "experiment_mode": mode,
                         "candidate_depth": candidate_depth,
                         "future_horizon_requested_s": future_horizon_s,
+                        "chunk_continuation": chunk_continuation,
+                        "future_representation": future_representation,
                         "rollout_latency_ms": rollout_ms,
                         "rollout_steps_total": rollout_steps,
                     }
                 )
+                if continuation_diag is not None:
+                    append_json(
+                        out / "continuation.jsonl",
+                        {
+                            "step": step,
+                            "chosen": choice,
+                            "continuation": chunk_continuation,
+                            "candidates": continuation_diag,
+                        },
+                    )
+            record["phase"] = phase_of(before[value_key])
+            if budgets:
+                latest = [b for b in budgets if b["step"] == step]
+                if latest:
+                    record["token_budget_estimated"] = {
+                        "base_tokens": sum(b["base_tokens"] for b in latest),
+                        "immediate_tokens": sum(b["immediate_tokens"] for b in latest),
+                        "future_tokens": sum(b["future_tokens"] for b in latest),
+                        "total_tokens": sum(b["total_tokens"] for b in latest),
+                        "requests": len(latest),
+                    }
             if experiment_record is not None:
                 record.update(
                     {
@@ -399,6 +447,39 @@ def run(
             "rollout_steps_total": sum(r.get("rollout_steps_total", 0) for r in records),
             "rollout_latency_ms_total": round(
                 sum(r.get("rollout_latency_ms", 0.0) for r in records), 3
+            ),
+            "chunk_continuation": chunk_continuation
+            if mode in ("original_trajectory", "strong_policy_future")
+            else None,
+            "future_representation": future_representation
+            if mode in ("original_trajectory", "strong_policy_future")
+            else None,
+            "shuffle_future_arm": bool(shuffle_future_arm)
+            if mode == "strong_policy_future"
+            else None,
+            "termination_reason": termination,
+            "distance_remaining": final[value_key] if final else None,
+            "last_n_decision_progress": [
+                round(r["before_task_value"] - r["after_task_value"], 4) for r in records[-5:]
+            ],
+            # A cap taken from the fastest arm turns "slower" into "failed":
+            # a run still descending when it stopped was truncated, not beaten.
+            "still_progressing_at_cap": bool(
+                termination == "decision_limit"
+                and len(records) >= 3
+                and sum(r["before_task_value"] - r["after_task_value"] for r in records[-3:]) > 0.05
+            ),
+            "decisions_by_phase": {
+                name: sum(1 for r in records if r.get("phase") == name)
+                for name, _, _ in PHASES
+            },
+            "estimated_tokens_per_decision": round(
+                sum(r.get("token_budget_estimated", {}).get("total_tokens", 0) for r in records)
+                / max(len(records), 1)
+            ),
+            "estimated_future_tokens_per_decision": round(
+                sum(r.get("token_budget_estimated", {}).get("future_tokens", 0) for r in records)
+                / max(len(records), 1)
             ),
             "task_config_name": cfg["name"],
             "final_task_value": final[value_key] if final else None,

@@ -172,6 +172,7 @@ def test_modes_include_the_original_variants_and_four_controlled_arms():
     assert ORIGINAL_MODES == (
         "original",
         "original_no_oracle",
+        "original_no_oracle_compact",
         "original_deep",
         "original_trajectory",
         "strong_policy_future",

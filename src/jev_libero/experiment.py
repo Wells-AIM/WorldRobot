@@ -33,6 +33,9 @@ CONTROLLED_MODES = ("reactive", "short_preview", "counterfactual_future", "shuff
 ORIGINAL_MODES = (
     "original",
     "original_no_oracle",
+    # Stage 2: the same information as original_no_oracle, compactly formatted.
+    # It exists so representation can be separated from future information.
+    "original_no_oracle_compact",
     "original_deep",
     "original_trajectory",
     # Stage 1.5: the strong one-step baseline plus a future, differing from it
@@ -40,6 +43,33 @@ ORIGINAL_MODES = (
     # trajectory on top without touching the one-step fields.
     "strong_policy_future",
 )
+
+# Stage 2 arms. S1Original -> S1Compact isolates representation; S1Compact ->
+# PolicyCompact isolates the future; PolicyCompact -> PolicyShuffle isolates the
+# action-future correspondence.
+STAGE2_ARMS = {
+    "s1_original": {"mode": "original_no_oracle"},
+    "s1_compact": {"mode": "original_no_oracle_compact"},
+    "policy_compact": {
+        "mode": "strong_policy_future",
+        "continuation": "policy_consistent",
+        "representation": "compact",
+    },
+    "policy_shuffle": {
+        "mode": "strong_policy_future",
+        "continuation": "policy_consistent",
+        "representation": "compact",
+        "shuffle": True,
+    },
+    # Kept for the representation-dilution diagnostic; not a main-benchmark arm.
+    "policy_full": {
+        "mode": "strong_policy_future",
+        "continuation": "policy_consistent",
+        "representation": "full",
+    },
+}
+STAGE2_MAIN_ARMS = ("s1_original", "s1_compact", "policy_compact", "policy_shuffle")
+
 
 # Stage 1.5 arms, by the names the report uses.
 STAGE15_ARMS = {

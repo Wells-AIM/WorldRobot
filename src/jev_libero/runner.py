@@ -82,6 +82,7 @@ def run(
     future_representation="full",
     shuffle_future_arm=False,
 ):
+    from .compact import CompactFormattingAPI
     from .experiment import (
         MODES,
         ORIGINAL_MODES,
@@ -116,7 +117,7 @@ def run(
             "experiment_mode": mode,
             "candidate_count": candidate_count if mode not in ORIGINAL_MODES else None,
             "candidate_depth": None
-            if mode in ("original", "original_no_oracle")
+            if mode in ("original", "original_no_oracle", "original_no_oracle_compact")
             else candidate_depth,
             "future_horizon_requested_s": future_horizon_s
             if mode == "original_trajectory"
@@ -125,7 +126,8 @@ def run(
             else horizon_for(mode, future_horizon_s),
             "shuffle_seed": shuffle_seed if mode == "shuffle_future" else None,
             "chunk_continuation": None
-            if mode in ("original", "original_no_oracle", "reactive")
+            if mode in ("original", "original_no_oracle", "original_no_oracle_compact",
+                        "reactive")
             else chunk_continuation,
             "candidate_controls": ACTIONS,
             "horizon_environment_steps": 8,
@@ -162,10 +164,17 @@ def run(
         )
         # strong_policy_future is S1 plus a trajectory, so it filters the
         # oracle exactly as S1 does; the trajectory is the only difference.
-        if mode in ("original_no_oracle", "strong_policy_future"):
+        if mode in ("original_no_oracle", "original_no_oracle_compact",
+                    "strong_policy_future"):
             api = OracleFilteringAPI(api)
         if mode == "strong_policy_future" and shuffle_future_arm:
             api = ShufflingTrajectoryAPI(api, seed=shuffle_seed)
+        # One serializer for every compact arm. keep_future=False makes the S1
+        # compact arm structurally unable to carry a trajectory.
+        if mode == "original_no_oracle_compact":
+            api = CompactFormattingAPI(api, keep_future=False)
+        elif mode == "strong_policy_future" and future_representation == "compact":
+            api = CompactFormattingAPI(api, keep_future=True)
         api = TokenAccountingAPI(api)
         budgets = api.budgets
         world = World(
@@ -437,7 +446,7 @@ def run(
             "experiment_mode": mode,
             "candidate_count": candidate_count if mode not in ORIGINAL_MODES else None,
             "candidate_depth": None
-            if mode in ("original", "original_no_oracle")
+            if mode in ("original", "original_no_oracle", "original_no_oracle_compact")
             else candidate_depth,
             "future_horizon_requested_s": future_horizon_s
             if mode == "original_trajectory"

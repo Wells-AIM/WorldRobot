@@ -112,3 +112,62 @@ def test_provider_credentials_are_not_mixed(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "router-test-key")
     with pytest.raises(ValueError, match="TYPESAFE_API_KEY"):
         Decisions(tmp_path, provider="typesafe", session=Session())
+
+
+class FlakyResponse(Response):
+    """A transient upstream failure, then a normal answer."""
+
+    def __init__(self, status, choice="hold"):
+        super().__init__(choice)
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"{self.status_code} Server Error")
+
+
+class FlakySession(Session):
+    def __init__(self, statuses, choice="hold"):
+        super().__init__(choice)
+        self.statuses = list(statuses)
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        status = self.statuses.pop(0) if self.statuses else 200
+        return FlakyResponse(status, self.choice)
+
+
+def test_transient_5xx_is_retried_then_succeeds(tmp_path, monkeypatch):
+    """A 520 should not end a 60-decision episode."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("jev_libero.client.time.sleep", lambda _: None)
+    session = FlakySession([520, 503])
+    api = Decisions(tmp_path, session=session, budget_usd=1.0)
+    assert api.choose(0, "motor", {}, "pick", {"hold": {}}) == "hold"
+    assert len(session.calls) == 3
+    errors = [json.loads(x) for x in (tmp_path / "transport_errors.jsonl").read_text().splitlines()]
+    assert [e["error"] for e in errors] == ["HTTP 520", "HTTP 503"]
+    assert all(e["retrying"] for e in errors)
+
+
+def test_client_error_is_not_retried(tmp_path, monkeypatch):
+    """A 400 is a request problem; retrying it would just burn budget."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("jev_libero.client.time.sleep", lambda _: None)
+    session = FlakySession([400, 400, 400, 400, 400])
+    api = Decisions(tmp_path, session=session, budget_usd=1.0)
+    with pytest.raises(requests.exceptions.HTTPError):
+        api.choose(0, "motor", {}, "pick", {"hold": {}})
+    assert len(session.calls) == 1
+
+
+def test_retries_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("jev_libero.client.time.sleep", lambda _: None)
+    session = FlakySession([520] * 10)
+    api = Decisions(tmp_path, session=session, budget_usd=1.0)
+    with pytest.raises(requests.exceptions.HTTPError):
+        api.choose(0, "motor", {}, "pick", {"hold": {}})
+    from jev_libero.client import RETRIES
+
+    assert len(session.calls) == RETRIES

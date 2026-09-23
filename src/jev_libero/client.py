@@ -17,6 +17,11 @@ PROVIDERS = {
 # Official published price: https://typesafe.ai ($42/billion input tokens).
 TYPESAFE_INPUT_USD_PER_MILLION = 0.042
 
+RETRIES = 4
+RETRY_BACKOFF_S = 3
+# Transient upstream conditions only; 4xx is a request problem and is not retried.
+RETRY_STATUS = frozenset({500, 502, 503, 504, 520, 521, 522, 524, 529})
+
 
 class BudgetExceeded(RuntimeError):
     pass
@@ -108,25 +113,36 @@ class Decisions:
                 layer: {"type": "choice", "instructions": instructions, "criteria": criteria}
             },
         }
-        for attempt in range(2):
+        # A transient upstream failure should not end a 60-decision episode.
+        # Retries are bounded, backed off, and logged; a request that reaches
+        # the model is never retried, since only transport and 5xx are retried.
+        response = None
+        for attempt in range(RETRIES):
             start = time.perf_counter()
             try:
                 response = self.session.post(self.endpoint, json=body, timeout=45)
-                break
-            except requests.exceptions.SSLError as exc:
-                append_json(
-                    self.out / "transport_errors.jsonl",
-                    {
-                        "step": step,
-                        "layer": layer,
-                        "attempt": attempt,
-                        "request": body,
-                        "error": str(exc),
-                    },
-                )
-                if attempt:
-                    raise
-                time.sleep(2)
+                if response.status_code not in RETRY_STATUS:
+                    break
+                problem = f"HTTP {response.status_code}"
+            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as exc:
+                problem = f"{type(exc).__name__}: {exc}"
+                response = None
+            append_json(
+                self.out / "transport_errors.jsonl",
+                {
+                    "step": step,
+                    "layer": layer,
+                    "attempt": attempt,
+                    "error": problem,
+                    "retrying": attempt < RETRIES - 1,
+                },
+            )
+            if attempt == RETRIES - 1:
+                if response is not None:
+                    response.raise_for_status()
+                raise RuntimeError(f"Provider unreachable after {RETRIES} attempts: {problem}")
+            time.sleep(RETRY_BACKOFF_S * (attempt + 1))
         elapsed = time.perf_counter() - start
         try:
             result = response.json()

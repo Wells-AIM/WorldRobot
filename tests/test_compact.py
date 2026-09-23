@@ -207,3 +207,65 @@ def test_every_main_arm_has_a_mode(arm):
     from jev_libero.experiment import MODES
 
     assert STAGE2_ARMS[arm]["mode"] in MODES
+
+
+# --- Regression: the shuffle must survive the compact serializer -------------
+
+
+def test_shuffle_deranges_after_compact_renames_the_future_key():
+    """The bug this catches made Comparison C meaningless.
+
+    CompactFormattingAPI renames `future_trajectory` to `future` before the
+    shuffle wrapper sees it. A shuffle that only recognised the old key silently
+    did nothing, so policy_shuffle sent the same assignment as policy_compact
+    while claiming to be its negative control.
+    """
+    from jev_libero.experiment import ShufflingTrajectoryAPI
+
+    criteria = {
+        f"c{i}": option(future_trajectory={"paths": {"d": [float(i), float(i) + 1]}})
+        for i in range(6)
+    }
+    inner = MockJev()
+    # Same wrapping order the runner uses: compact is the outer call.
+    api = CompactFormattingAPI(ShufflingTrajectoryAPI(inner, seed=3), keep_future=True)
+    api.choose(0, "motor", {}, "pick", criteria)
+    sent = inner.requests[0]["criteria"]
+    originals = {name: option["future_trajectory"] for name, option in criteria.items()}
+    moved = sum(1 for name in criteria if sent[name]["future"] != originals[name])
+    assert moved == len(criteria), f"only {moved}/{len(criteria)} futures moved"
+
+
+def test_shuffle_keeps_the_future_set_and_changes_only_the_assignment():
+    from jev_libero.experiment import ShufflingTrajectoryAPI
+
+    criteria = {
+        f"c{i}": option(future_trajectory={"paths": {"d": [float(i)]}}) for i in range(5)
+    }
+    plain, shuffled = MockJev(), MockJev()
+    CompactFormattingAPI(plain, keep_future=True).choose(
+        0, "motor", {}, "pick", criteria)
+    CompactFormattingAPI(ShufflingTrajectoryAPI(shuffled, seed=11), keep_future=True).choose(
+        0, "motor", {}, "pick", criteria)
+    a = plain.requests[0]["criteria"]
+    b = shuffled.requests[0]["criteria"]
+    assert set(a) == set(b)
+    # identical physics
+    assert sorted(map(str, (o["future"] for o in a.values()))) == sorted(
+        map(str, (o["future"] for o in b.values())))
+    # different correspondence, with no fixed point
+    assert all(a[name]["future"] != b[name]["future"] for name in a)
+    # the immediate part is untouched by the shuffle
+    for name in a:
+        assert {k: v for k, v in a[name].items() if k != "future"} == {
+            k: v for k, v in b[name].items() if k != "future"}
+
+
+def test_shuffle_is_inert_when_there_is_no_future():
+    """An S1 arm must not be disturbed even if the wrapper is present."""
+    from jev_libero.experiment import ShufflingTrajectoryAPI
+
+    inner = MockJev()
+    api = CompactFormattingAPI(ShufflingTrajectoryAPI(inner, seed=1), keep_future=False)
+    api.choose(0, "motor", {}, "pick", {f"c{i}": option() for i in range(4)})
+    assert all("future" not in o for o in inner.requests[0]["criteria"].values())

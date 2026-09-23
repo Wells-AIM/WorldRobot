@@ -372,20 +372,30 @@ class ShufflingTrajectoryAPI:
     def calls(self):
         return self.inner.calls
 
+    # The key a future travels under depends on which wrapper has already run:
+    # the compact serializer renames `future_trajectory` to `future`. Matching
+    # any of them keeps the derangement correct whatever the wrapping order.
+    FUTURE_KEYS = ("future", "future_trajectory", "trajectory")
+
+    @classmethod
+    def future_key(cls, option):
+        if not isinstance(option, dict):
+            return None
+        return next((key for key in cls.FUTURE_KEYS if key in option), None)
+
     def choose(self, step, layer, state, instructions, criteria):
         from .futures import derangement
 
-        carriers = [
-            name
-            for name, option in (criteria or {}).items()
-            if isinstance(option, dict) and "future_trajectory" in option
-        ]
+        keys = {
+            name: self.future_key(option) for name, option in (criteria or {}).items()
+        }
+        carriers = [name for name, key in keys.items() if key]
         if len(carriers) > 1:
             mapping = derangement(carriers, self.seed + step)
-            futures = {name: criteria[name]["future_trajectory"] for name in carriers}
+            futures = {name: criteria[name][keys[name]] for name in carriers}
             criteria = {
                 name: (
-                    {**option, "future_trajectory": futures[mapping[name]]}
+                    {**option, keys[name]: futures[mapping[name]]}
                     if name in carriers
                     else option
                 )

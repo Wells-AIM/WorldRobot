@@ -99,7 +99,10 @@ Candidates are generated once per decision, from state alone, by
 4. K slots are allocated across families by largest remainder **in proportion to
    family size**, and picks are spread across each family including its
    endpoints. No score, no reward, no success predicate is consulted.
-5. Each first input is extended to depth D by repetition: `[a, a, a]`.
+5. Each first input is extended to depth D by the configured continuation:
+   `repeat` gives `[a, a, a]`, `hold` gives `[a, hold, hold]`. See
+   `--chunk-continuation`; the choice is not neutral, and the measured
+   consequences are below.
 
 Because selection depends only on the state, the candidate set is identical
 across all four arms by construction. This is asserted offline
@@ -141,10 +144,11 @@ on CPU) and is linear in K, not the forbidden exponential `27^D` search.
 Smaller K remains available via `--candidate-count` for cost-constrained sweeps,
 and `allocate`/`spread` keep the menu proportional at any K.
 
-**Limitation.** Depth extension by repetition is a deliberate v1 choice: it is
-deterministic, reward-free, and asks exactly "what if the robot keeps doing
-this?". It is not a search over action sequences, and it does not explore
-mixed-primitive chunks. The interface takes any list of primitives, so a richer
+**Limitation.** Neither continuation is a search over action sequences, and
+mixed-primitive chunks are unexplored. `repeat` asks "what if the robot keeps
+doing this?", which systematically misrepresents large steps; `hold` asks "what
+if the robot does this and settles?", which turns out to duplicate the
+one-primitive field. The interface takes any list of primitives, so a real
 proposer can be dropped in without touching the rollout or summary code.
 
 ## Counterfactual rollout
@@ -281,62 +285,6 @@ API cost scales with K too. Measured on TypeSafe at K=27, D=3, 1.2 s horizon:
 **32,385 input tokens per decision**, about $0.00136 per decision at the
 published $0.042/M input price.
 
-## First real-Jev run: all four arms (n=1, not yet a result)
-
-`top_drawer`, seed 1, init state 0, K=27, D=3, 30 decisions, TypeSafe
-`jev-latest`. Every arm shares the task, the initial state, the seed, the
-candidate generator, the candidate budget, the primitives, the feasibility rules
-and the decision cap. Only the future information differs.
-
-| | reactive | short_preview | counterfactual | shuffle |
-|---|---:|---:|---:|---:|
-| horizon | 0 s | 0.4 s | 1.2 s | 1.2 s (deranged) |
-| decisions / env steps / API calls | 30 / 240 / 30 | 30 / 240 / 30 | 30 / 240 / 30 | 30 / 240 / 30 |
-| input tokens per decision | 1,970 | 18,725 | 31,771 | 31,142 |
-| **drawer closed** | **0.00 mm** | **0.00 mm** | **111.25 mm** | **0.00 mm** |
-| states in contact with target | 0 / 30 | 0 / 30 | **18 / 30** | 0 / 30 |
-| minimum surface gap | 93.48 mm | 81.17 mm | **0.00 mm** | 93.48 mm |
-| final surface gap | 637.80 mm | 306.69 mm | **0.00 mm** | 493.22 mm |
-| LIBERO success | no | no | no | no |
-| API cost | $0.0025 | $0.0236 | $0.0400 | $0.0392 |
-| oracle leakage | 0 | 0 | 0 | 0 |
-
-No arm reached the LIBERO predicate within 30 decisions. Only the
-counterfactual arm approached the drawer at all: the other three drifted away
-from it, ending 3x to 7x further from the target surface than they started.
-
-The two controls do the work they were built for:
-
-- **`short_preview` rules out "any lookahead helps."** One primitive of
-  consequence (0.4 s) performed exactly like no consequence at all. Whatever
-  produced the difference, it is not the mere presence of a predicted outcome.
-- **`shuffle_future` rules out "more tokens help."** It carries 31,142 input
-  tokens per decision against the counterfactual arm's 31,771 — within 2% — with
-  the same schema, the same candidate set and the same checkpoint count. Only
-  the action-to-future correspondence is broken, and the progress disappears
-  entirely. The derangement was verified to have zero fixed points across all
-  30 decisions.
-
-So the difference tracks the **correspondence between an action and its own
-multi-step future**, not prompt length and not lookahead per se.
-
-**This is still one episode per arm.** One task, one seed, one initial state, no
-repetition. A single episode cannot separate "counterfactual reasoning helps"
-from "this particular rollout got lucky", and four arms at n=1 give no error
-bars. The result is reported because the control pattern is coherent and the
-mechanism is verified end to end, not because the question is answered.
-
-What it would take to make this a result: repetition across seeds and initial
-states, all three bundled tasks, and the full horizon sweep, so that the
-reactive / 0.4 s / 1.2 s / shuffle ordering can be shown to hold rather than
-observed once.
-
-A note on the recorded `candidate_count`: it varies between 25 and 27 across
-decisions because the hard collision rules reject a few inputs in some states,
-and the arms visit different states once their choices diverge. Candidate parity
-is a per-state property — identical candidates given identical state — and that
-is what the tests assert.
-
 ## Testing the published pipeline against itself
 
 The four controlled arms measure future information against a baseline that had
@@ -369,14 +317,16 @@ primitive still executes.
 | original, verdict shown | 30 | yes | **17** | 1,827 | $0.0013 |
 | original, verdict withheld | 30 | yes | **25** | 1,541 | $0.0016 |
 | original_deep D=3 | 60 | yes | **49** | 2,024 | $0.0042 |
-| original_trajectory D=3 | 60 | yes | **49** | 7,116 | $0.0146 |
+| original_trajectory D=3, repeat | 60 | yes | **49** | 7,116 | $0.0146 |
+| original_trajectory D=3, hold | 60 | yes | **49** | 5,459 | $0.0110 |
 
 **Every variant succeeds.** Adding future information to the published pipeline
-does not break it; it makes it slower, by a factor of about three. Endpoint-only
-(`original_deep`) and path-preserving (`original_trajectory`) land on exactly
-the same decision count, so preserving the intermediate states did not recover
-the loss — it only cost 3.5x more tokens to reach the same place. Withholding
-the success predicate costs about eight decisions.
+does not break it; it makes it slower, by a factor of about three. All three
+augmented variants land on exactly the same 49 decisions, whether the path is
+discarded (`original_deep`), preserved (`original_trajectory` with `repeat`), or
+preserved with a settling continuation (`hold`) — the last of which fixes the
+early phase and still finishes at 49. Withholding the success predicate costs
+about eight decisions. The next section takes this apart.
 
 #### Two earlier conclusions were wrong, and why
 
@@ -433,21 +383,76 @@ derangement fixed points — and shows none of the progress, so the difference i
 not prompt length. What tracks it is the correspondence between an action and
 its own future.
 
-### Where this leaves the research question
+### Why the augmented arms are slower
 
-Across ten arms on one task, seed and initial state:
+Measured from the episode logs, no extra API spend.
 
-- Jev solves the task. The published pipeline succeeds in 17 decisions on 1,827
-  tokens each.
-- The success predicate helps but is not required (17 vs 25 decisions).
-- More future information, added to that pipeline in either form, is
-  consistently **slower** (49 decisions) and more expensive, and never faster.
-- In a stripped single-layer setting, trajectory-level future is the difference
-  between moving toward the target and wandering away from it.
+The augmented arms pick small increments where the original picks large ones.
+Translations by size, over the whole episode:
 
-The two settings disagree, and that is the interesting part: the same
-information that rescues a weak critic slows down a strong one. Nothing here is
-repeated, so all of it is a single observation.
+| arm | 40 mm | 10 mm | 3 mm | early progress (≥50 mm out) |
+|---|---:|---:|---:|---:|
+| original | 12 | 0 | 2 | **12.30 mm / decision** |
+| original_deep D=3 | 10 | 16 | 22 | 3.54 |
+| original_trajectory, repeat | 12 | 20 | 17 | 4.95 |
+| original_trajectory, hold | 16 | 9 | 17 | **10.26** |
+
+**The chunk, not the horizon, was doing the damage.** A candidate chunk repeats
+its own primitive D times, so a 40 mm input is shown as 120 mm of travel — and
+that saturates. Across the episode the 3-step approach is 2.67x the 1-step
+figure for 3 mm inputs, 1.17x for 10 mm, and 1.04x for 40 mm, the 40 mm mean
+going negative as the chunk overshoots and comes back. The consequence is
+direct: a 40 mm step beats a 10 mm step by **2.66x** as the single primitive
+that executes, but by only **1.03x** as a 3-repeat chunk. The representation
+erases the distinction the critic needs for the decision it is making.
+
+Switching the continuation to `hold` — the input, then settle — recovers most of
+the early-phase speed, 4.95 to 10.26 mm per decision against the original's
+12.30, and the action mix flips back to large steps. **It does not recover the
+decision count**: `hold` still finishes in 49 decisions, the same as `repeat`,
+because it spends 39 decisions below 50 mm where the original spends 8, and 24
+of those grinding between 5 and 20 mm.
+
+A hypothesis for that endgame — that candidate trajectories become
+indistinguishable near the goal — was tested and is **false**. Comparing the
+spread of the trajectory endpoint across candidates against the spread of the
+one-primitive field:
+
+| arm | phase | 1-step spread | trajectory spread | ratio |
+|---|---|---:|---:|---:|
+| repeat | ≥50 mm | 3.96 | 18.28 | 4.62 |
+| repeat | <50 mm | 4.15 | 23.71 | 5.72 |
+| hold | ≥50 mm | 6.45 | 6.59 | 1.02 |
+| hold | <50 mm | 3.51 | 3.41 | 0.97 |
+
+The trajectory keeps separating the candidates. What the numbers show instead is
+that the two continuations fail in different ways: `repeat` carries a large
+signal pointing the wrong way, and `hold` carries a signal that is **a near
+duplicate of the one-primitive field it sits next to** — ratio 1.0 in both
+phases — so it adds prompt volume and no information.
+
+**The late-phase slowdown remains unexplained.** Prompt dilution is the obvious
+candidate and has not been tested. It should not be asserted until it is.
+
+### What this says about the research question
+
+Two settings, and they disagree in a way that now makes sense:
+
+- **Given accurate one-primitive consequences of the action that will actually
+  run**, reasoning further ahead did not improve selection in any form tried.
+  The longer horizon is either about a different action (`repeat`, which shows
+  the input done three times) or about nothing new (`hold`, whose endpoint
+  duplicates the one-step field). Both cost decisions; neither saves any.
+- **Given none of those fields**, trajectory-level future is the difference
+  between approaching the drawer and wandering away from it: 111 mm closed and
+  18 of 30 states in contact, against 0 mm and no contact for the reactive,
+  short-preview and shuffled arms.
+
+So on this evidence the useful question is not how far to reason, but **what the
+critic already knows about the step it is about to take**. Counterfactual future
+reasoning paid for itself only where that knowledge was missing.
+
+One task, one seed, one initial state, one episode per arm.
 
 ## Shuffle future (negative control)
 
@@ -597,11 +602,12 @@ mixed-effects statistics, and the 8-task main experiment.
 2. **Re-run the four controlled arms at a higher cap.** The counterfactual arm
    was still descending at decision 30, so its non-success is a truncation.
    Until that is redone, the four-arm table reports progress, not outcomes.
-3. **Explain the slowdown.** Every way of adding future information to the
-   published pipeline costs the same 49 decisions against its 17, whether or not
-   the path is preserved. Whether that is prompt dilution, a bias toward large
-   sweeping moves, or something about the late fine-adjustment phase is
-   untested, and it is the most interesting open question here.
+3. **Explain the endgame.** The early-phase half of the slowdown is diagnosed
+   and fixed by the `hold` continuation. The late phase is not: `hold` still
+   spends 39 decisions below 50 mm against the original's 8, and the obvious
+   hypothesis — that candidate trajectories stop discriminating near the goal —
+   was tested and found false. Prompt dilution is the next candidate and has not
+   been tested.
 4. **Horizon ablation** against the strong baseline, sweeping
    0 / 0.4 / 0.8 / 1.2 / 2.0 s. The interface already supports it.
 5. **Future-information ablation**: drop checkpoints, drop events, keep only the

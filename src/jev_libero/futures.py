@@ -169,7 +169,29 @@ def spread(members, slots):
     return [members[round(i * step)] for i in range(slots)]
 
 
-def generate_candidates(predictions, feasible, count, depth):
+CONTINUATIONS = ("repeat", "hold")
+
+
+def chunk_actions(name, depth, continuation="repeat"):
+    """The action sequence whose future is shown for `name`.
+
+    Only `name` ever executes, so the rest of the chunk is a continuation
+    assumption, and it is not neutral. Under "repeat" a 40mm step becomes 120mm
+    of travel, which saturates: measured over a real episode the 3-step approach
+    is 2.67x the 1-step figure for 3mm inputs but only 1.04x for 40mm ones. That
+    compresses the real 2.66x advantage of a large step over a small one down to
+    1.03x, and the critic can no longer tell them apart for the decision it is
+    actually making. "hold" instead lets the action settle, which keeps the
+    chunk about `name` rather than about doing `name` three times.
+    """
+    if continuation not in CONTINUATIONS:
+        raise ValueError(f"Unknown chunk continuation: {continuation}")
+    if continuation == "hold":
+        return [name] + ["hold"] * (depth - 1)
+    return [name] * depth
+
+
+def generate_candidates(predictions, feasible, count, depth, continuation="repeat"):
     """Deterministic, mode-independent candidate chunks.
 
     Selection never reads the LIBERO reward, the success predicate, or any task
@@ -192,7 +214,7 @@ def generate_candidates(predictions, feasible, count, depth):
     return [
         CandidateSequence(
             candidate_id=f"C{index + 1}",
-            actions=[name] * depth,
+            actions=chunk_actions(name, depth, continuation),
             family=family(name, predictions[name]),
             first_input=name,
         )

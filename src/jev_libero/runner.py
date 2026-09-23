@@ -65,6 +65,7 @@ def run(
     candidate_depth=3,
     future_horizon_s=1.2,
     shuffle_seed=0,
+    chunk_continuation="repeat",
 ):
     from .experiment import (
         MODES,
@@ -106,6 +107,9 @@ def run(
             if mode in ORIGINAL_MODES
             else horizon_for(mode, future_horizon_s),
             "shuffle_seed": shuffle_seed if mode == "shuffle_future" else None,
+            "chunk_continuation": None
+            if mode in ("original", "original_no_oracle", "reactive")
+            else chunk_continuation,
             "candidate_controls": ACTIONS,
             "horizon_environment_steps": 8,
             "collision_aware": True,
@@ -173,7 +177,13 @@ def run(
                 _, deep = world.predict_all_deep(grip, candidate_depth)
             elif mode == "original_trajectory":
                 rollout_steps, rollout_ms = attach_trajectories(
-                    world, predictions, grip, candidate_depth, cfg, future_horizon_s
+                    world,
+                    predictions,
+                    grip,
+                    candidate_depth,
+                    cfg,
+                    future_horizon_s,
+                    chunk_continuation,
                 )
             # Witnesses are the pipeline's escape hatch when no contract passes.
             # Every original-family variant gets them on the same terms, so the
@@ -215,6 +225,7 @@ def run(
                     future_horizon_s=future_horizon_s,
                     shuffle_seed=shuffle_seed,
                     history=controlled_history,
+                    continuation=chunk_continuation,
                 )
                 routing = {
                     "intent": None,

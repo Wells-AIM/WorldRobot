@@ -19,8 +19,10 @@ from jev_libero.experiment import (
     prune_oracle,
 )
 from jev_libero.futures import (
+    CONTINUATIONS,
     ORACLE_MARKERS,
     allocate,
+    chunk_actions,
     contains_oracle,
     derangement,
     generate_candidates,
@@ -388,3 +390,23 @@ def test_oracle_markers_cover_the_original_leaky_fields():
     for field in ("success", "can_finish_task", "predicted_task_complete", "terminal_success"):
         assert contains_oracle({field: True}) == [field], field
     assert "success" in ORACLE_MARKERS
+
+
+def test_chunk_continuation_shapes_the_sequence():
+    assert chunk_actions("x+40mm", 3, "repeat") == ["x+40mm"] * 3
+    assert chunk_actions("x+40mm", 3, "hold") == ["x+40mm", "hold", "hold"]
+    assert chunk_actions("x+40mm", 1, "hold") == ["x+40mm"]
+    assert set(CONTINUATIONS) == {"repeat", "hold"}
+    with pytest.raises(ValueError):
+        chunk_actions("x+40mm", 3, "search")
+
+
+def test_continuation_reaches_the_candidate_set(recorded):
+    """The chunk the critic is shown must follow the requested continuation."""
+    cfg, rows = recorded
+    feasible, _ = hard_feasible(rows[0]["before"], rows[0]["predictions"], cfg)
+    repeat = generate_candidates(rows[0]["predictions"], feasible, 6, 3, "repeat")
+    hold = generate_candidates(rows[0]["predictions"], feasible, 6, 3, "hold")
+    assert [c.first_input for c in repeat] == [c.first_input for c in hold]
+    assert all(len(set(c.actions)) == 1 for c in repeat)
+    assert all(c.actions[1:] == ["hold", "hold"] for c in hold)

@@ -111,7 +111,9 @@ class OracleFilteringAPI:
         self.inner.close()
 
 
-def attach_trajectories(world, predictions, grip, depth, task_config, horizon=None):
+def attach_trajectories(
+    world, predictions, grip, depth, task_config, horizon=None, continuation="repeat"
+):
     """Add a `trajectory` field to each prediction, in place.
 
     The published pipeline's derived fields keep describing the single primitive
@@ -121,11 +123,14 @@ def attach_trajectories(world, predictions, grip, depth, task_config, horizon=No
 
     Returns (simulated_steps, latency_ms) for the decision record.
     """
-    from .futures import CandidateSequence, rollout_all
+    from .futures import CandidateSequence, chunk_actions, rollout_all
 
     candidates = [
         CandidateSequence(
-            candidate_id=name, actions=[name] * depth, family="", first_input=name
+            candidate_id=name,
+            actions=chunk_actions(name, depth, continuation),
+            family="",
+            first_input=name,
         )
         for name in predictions
     ]
@@ -134,6 +139,7 @@ def attach_trajectories(world, predictions, grip, depth, task_config, horizon=No
         # Checkpoint 0 is the current state, already in the prompt's `before`.
         predictions[name]["trajectory"] = {
             "horizon_s": round(result.horizon_seconds, 3),
+            "continuation": continuation,
             "checkpoints": result.checkpoints[1:],
             "events": result.events,
         }
@@ -166,6 +172,7 @@ def decide(
     future_horizon_s=1.2,
     shuffle_seed=0,
     history=None,
+    continuation="repeat",
 ):
     """One controlled decision. Returns (first_input_to_execute, record)."""
     if mode not in CONTROLLED_MODES:
@@ -177,7 +184,9 @@ def decide(
         raise NoFeasibleAction(
             "No candidate passes the hard physical feasibility rules; stopping without a fallback."
         )
-    candidates = generate_candidates(predictions, feasible, candidate_count, candidate_depth)
+    candidates = generate_candidates(
+        predictions, feasible, candidate_count, candidate_depth, continuation
+    )
     horizon = horizon_for(mode, future_horizon_s)
     rollouts = {}
     if horizon and horizon > 0:
@@ -228,6 +237,7 @@ def decide(
             max((r.horizon_seconds for r in rollouts.values()), default=0.0), 4
         ),
         "candidate_depth": candidate_depth,
+        "chunk_continuation": continuation,
         "candidate_count": len(candidates),
         "shuffle_seed": shuffle_seed if mode == "shuffle_future" else None,
         "candidates": [

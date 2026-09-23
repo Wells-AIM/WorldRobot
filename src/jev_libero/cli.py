@@ -7,6 +7,7 @@ from pathlib import Path
 from . import __version__
 from .config import TASKS, load_task
 from .experiment import MODES
+from .futures import CONTINUATIONS
 
 
 def main(argv=None):
@@ -55,6 +56,13 @@ def main(argv=None):
     )
     live.add_argument("--candidate-depth", type=int, default=3)
     live.add_argument("--shuffle-seed", type=int, default=0)
+    live.add_argument(
+        "--chunk-continuation",
+        choices=CONTINUATIONS,
+        default="repeat",
+        help="How a candidate chunk continues past its first input. repeat saturates "
+        "for large steps and hides their advantage; hold lets the action settle",
+    )
     live.add_argument(
         "--no-render", action="store_true", help="Save controls/state, but no GIF or camera frames"
     )
@@ -114,6 +122,7 @@ def main(argv=None):
             candidate_depth=args.candidate_depth,
             future_horizon_s=args.future_horizon_s,
             shuffle_seed=args.shuffle_seed,
+            chunk_continuation=args.chunk_continuation,
         )
         print(json.dumps(result, indent=2))
         return 0 if result["success"] else 1

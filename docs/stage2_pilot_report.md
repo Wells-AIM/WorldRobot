@@ -282,7 +282,40 @@ level at 5/9, and the shuffle arm actually solved one block policy_compact
 failed (top_drawer init 1). Four paired observations, all pointing the same way,
 is a direction — not an effect size anyone should quote.
 
-<!--PLACEHOLDER:repeat-->
+## 6. Repeatability — Jev variability within a condition
+
+Reported separately and **not** mixed into the method comparisons. Three repeats
+of `policy_compact` per task, on a predeclared initial state, with identical
+task, seed, code and prompt construction. Only the provider's own stochasticity
+can differ.
+
+| task | successes | first action agrees | identical prefix | decisions | spread | token spread |
+|---|:---:|:---:|---:|---|---:|---:|
+| alphabet_soup | 3/3 | ✅ | 27 / 41 | 41, 41, 41 | **0** | 0.14% |
+| top_drawer | 3/3 | ✅ | 14 / 32 | 32, 32, **33** | 1 | 1.18% |
+| microwave | 3/3 | ✅ | 3 / 14 | 17, 17, **14** | **3** | **23.98%** |
+
+**All nine repeats succeeded, and the first action always agreed.** Beyond that
+the picture is mixed and the pattern is consistent across tasks: **two repeats
+are byte-identical and the third diverges.** top_drawer's repeats 0 and 1 agree
+to the token (79,408 both); repeat 2 splits at decision 15 and takes one more
+decision. microwave's repeats 0 and 1 agree exactly; repeat 2 splits at decision
+4 and finishes *three decisions faster*.
+
+That last detail matters: divergence is not simply degradation. The outlier run
+was the best of the three.
+
+**This is small but not negligible, and on one task it is not small relative to
+the effects being measured.** microwave's spread of 3 decisions sits in the same
+range as Comparison B's mean effect of −7.5, and its 24% token spread dwarfs the
+differences the pilot is trying to resolve. alphabet_soup, by contrast, gave an
+identical decision count three times.
+
+**Recommendation, as a report rather than a change:** a formal study should
+either repeat inference per condition or restrict itself to effects larger than
+the within-condition spread. On this evidence a single inference per condition
+is defensible for alphabet_soup and top_drawer, and questionable for microwave.
+No change is made to the design here.
 
 ## 7. Future novelty — exploratory only
 
@@ -308,6 +341,122 @@ aligned decisions, adding a correct multi-step future did not change what
 PolicyCompact chose. Whatever value the future carries in Comparison B is
 concentrated in a small minority of decisions.
 
-<!--PLACEHOLDER:branch-->
+## 8. Branch judgement
 
-<!--PLACEHOLDER:files-->
+The pre-registered branches, against what the data shows:
+
+| branch | condition | holds? |
+|---|---|:---:|
+| A — Genuine future value | PolicyCompact > S1Compact **and** > Shuffle, across blocks | partial |
+| B — Representation dominates | S1Compact > S1Original, PolicyCompact ≈ S1Compact ≈ Shuffle | no |
+| C — Future context helps, correspondence unclear | PolicyCompact > S1Compact but ≈ Shuffle | no |
+| D — One-step sufficiency | S1Compact ≥ PolicyCompact, stably | no |
+
+Branch B is contradicted: S1Compact did **not** beat S1Original — it won 5/9
+against 7/9 and saved 0.3% of tokens. Branch C is contradicted in its second
+clause: PolicyCompact was faster than Shuffle in 4 of 4 blocks both solved.
+Branch D is contradicted among blocks both solved, where PolicyCompact was never
+slower.
+
+Branch A's two clauses both point the right way — PolicyCompact faster than
+S1Compact (2/0/2, mean −7.5) and faster than Shuffle (4/0/0, mean +9.25) — but
+its qualifier is "across multiple blocks, not from one initial state", and the
+evidence does not clear that bar:
+
+- Success counts are **level at 5/9** for all three future-bearing arms, and
+  `s1_original` leads at 7/9. No arm converted a failure into a success.
+- Comparison B rests on **four** paired blocks, two of which tied exactly. The
+  bootstrap interval reaches 0.
+- The 27-decision win on microwave init 1 carries most of the mean, and
+  microwave is the task whose repeatability spread is largest (3 decisions,
+  24% tokens). That single observation is not clearly outside the noise.
+- The two arms agreed on **120 of 128** aligned decisions. Whatever the future
+  contributes is concentrated in a handful of decisions per episode.
+
+### Verdict: **Inconclusive, leaning toward a sparse conditional effect**
+
+The pre-registered option for this situation is the honest one. The data are
+small, the success rates are flat, and the one clean directional signal
+(Comparison C) sits inside an overall picture where the plain baseline solved
+the most blocks.
+
+What the pilot does establish, and what it does not:
+
+**Established.** The three variables are now separable and verified separable —
+nine blocks, zero violated invariants. Lossless compaction alone bought
+essentially nothing on this pipeline. Breaking the action-future correspondence
+consistently costs decisions among blocks both arms solve. The effect of a
+correct future, where it exists, is concentrated in a small minority of
+decisions rather than spread across the episode.
+
+**Not established.** That a correct multi-step future improves success. That its
+decision-count advantage survives Jev's own variability. That any of this
+generalises beyond three initial states per task.
+
+## 9. Recommended next stage
+
+Not a horizon ablation. The pilot's own finding is that the effect, if real, is
+**sparse and conditional** — 120 of 128 aligned decisions were unaffected —
+so sweeping the horizon would vary the wrong knob.
+
+Two things the data point at directly:
+
+1. **Unseen initial states, to test the sparse conditional effect.** The pilot
+   used init 0/1/2; LIBERO ships 50 per task. Blocks produced **8 disagreement
+   points over 9 blocks**, almost exactly one each, because alignment ends at
+   the first divergence. Reaching ~30 adjudication points therefore needs on the
+   order of 33 blocks, not more decisions per block.
+2. **Paired counterfactual adjudication at the disagreement points.** At each
+   point where S1Compact and PolicyCompact diverge, the `Snapshot` machinery
+   already supports branching: execute *both* choices from the identical state
+   and carry each to termination. That converts a record of "they differed" into
+   a pair of comparable downstream outcomes, which is the only way to say
+   whether the future's choice was actually better.
+
+A caution for that design, from section 6: Jev's own repeats split at decision
+15 (top_drawer) and decision 4 (microwave). **A disagreement point may itself
+move between runs**, so an adjudication design should confirm a divergence is
+reproducible before adjudicating it.
+
+Also worth noting: `top_drawer__init_000` produced **zero** disagreements across
+32 aligned decisions. The two arms behaved identically for an entire episode.
+That is itself evidence for sparseness.
+
+## 10. Known limitations
+
+1. **n=1 per cell**, 9 blocks, of which 2 are uninformative — `alphabet_soup`
+   init 1 and 2 failed identically in all four arms on `no_feasible_action`,
+   leaving **7 effective blocks**.
+2. **Jev is not deterministic**, and on microwave the within-condition spread is
+   comparable to the between-method effects.
+3. **The model version is not pinned.** The provider exposes only `jev-latest`
+   and does not return the resolved version.
+4. **The compaction did not achieve its design goal** of a meaningful token
+   reduction, so Comparison A tests a smaller manipulation than intended.
+5. **Alignment is short in most blocks** (4 to 32 decisions), limiting how much
+   of each episode is comparable at the request level.
+6. **Bootstrap intervals are descriptive**, computed on 2–5 paired values. They
+   are reported to show spread, not to support inference.
+7. **The upstream float drift on this host is now ~8e-07**, verified identical
+   on an unmodified upstream checkout.
+
+## 11. Files
+
+| path | contents |
+|---|---|
+| `results/stage2/episodes.csv` | all 36 episodes, per-arm outcomes and costs |
+| `results/stage2/pairs.csv` | the three paired comparisons |
+| `results/stage2/task_summary.csv` | per task × arm |
+| `results/stage2/method_summary.csv` | per arm |
+| `results/stage2/completion_curve.csv` | Success@10…@60, overall and per task |
+| `results/stage2/action_disagreement.csv` | 128 aligned decisions, agreement and novelty |
+| `results/stage2/repeatability.csv` | 9 repeats, three tasks |
+| `results/stage2/cost_summary.json` | spend by arm |
+| `results/stage2/run_metadata.json` | config, seeds, reproducibility note |
+| `results/stage2/request_signatures.csv` | per-decision hashes |
+| `results/stage2/signature_checks.csv` | per-block invariant verdicts |
+| `results/stage2/available_initial_states.json` | 50 fixed states per task |
+| `results/stage2/cost_estimate.json` | pre-run projection |
+| `docs/stage2_pilot_report.md` | this report |
+
+**Total API spend for Stage 2: $0.147.** Project total: approximately $0.38.
